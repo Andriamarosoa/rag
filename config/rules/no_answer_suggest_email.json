@@ -14,7 +14,7 @@
       "type": "suggest_agent",
       "agent": "send_email",
       "label": "Send an email",
-      "post-message": "you can click to this link to",
+      "template": "<p>Vous pouver envoyer un email via this <link>{{labe}}</link></p>",
       "requires_confirmation": true
     }
   ]
