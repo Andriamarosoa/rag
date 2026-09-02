@@ -6,4 +6,5 @@ __pycache__/
 data/*.db
 data/*.db-*
 mariadb_data/
+codex_data/
 .DS_Store
