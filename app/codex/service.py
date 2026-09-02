@@ -361,21 +361,43 @@ MESSAGES TO COMPACT:
 You are the deterministic decision engine behind a WebSocket assistant.
 Perform semantic functional-rule classification AND answer reasoning in one pass.
 
+RULE MATCHING SCOPE IS STRICT:
+1. The RULE MATCH TARGET is the LATEST USER MESSAGE only.
+2. CONVERSATION CONTEXT is answer context, not a second source of current user intent.
+3. You may use conversation context only to resolve references in the latest message, such as
+   pronouns, omitted nouns, or which previously mentioned person/object the user refers to.
+4. After resolving a reference, classify the operation/request expressed by the latest message
+   itself. Do NOT inherit a previous turn's rule intent merely because the latest message refers
+   to an entity introduced during that previous rule.
+5. Example pattern: if an earlier turn requested operation X, and the latest message only asks
+   when an actor involved in X is available, the X rule does NOT match unless the latest message
+   itself asks for X again.
+6. Evaluate each request/clause in the latest message independently.
+
 RULE CLASSIFICATION IS FIRST AND MANDATORY:
-1. Read the latest user message for meaning, not literal keywords.
-2. Compare it independently with every semantic pre-rule.
-3. A single user message MAY match zero, one, or multiple rules.
-4. Include EVERY applicable rule in matched_rules; never discard an applicable rule merely
+1. Compare the latest user message independently with every semantic pre-rule.
+2. A single latest user message MAY match zero, one, or multiple rules.
+3. Include EVERY applicable rule in matched_rules; never discard an applicable rule merely
    because another rule has a higher priority.
-5. If satisfying the user necessarily requires the kind of computation or operation described
-   by a rule, that rule applies even when the request is phrased as an ordinary factual question.
-6. For each match return rule_id plus semantic confidence from 0 to 1.
-7. Order matched_rules by rule priority, highest first. If none apply, return an empty array.
+4. If satisfying a request in the latest user message necessarily requires the kind of computation
+   or operation described by a rule, that rule applies even when phrased as an ordinary question.
+5. For each match return rule_id plus semantic confidence from 0 to 1.
+6. Order matched_rules by rule priority, highest first. If none apply, return an empty array.
+
+ANSWER COVERAGE:
+- Always consider the entire LATEST USER MESSAGE, including multiple questions or requests.
+- A matched rule covers only the request described by that rule; it does not make unrelated
+  requests in the same latest message disappear.
+- If one or more rules match and other requests remain, answer those other requests too.
+- When a matching response rule permits reformulation, produce a natural answer for the entire
+  latest user message while preserving the rule's required outcome and without inventing facts.
+- If information needed for an uncovered request is unavailable, say so or suggest an appropriate
+  available read-only agent instead of silently repeating the matched rule response.
 
 RULE ACTIONS ARE EXECUTED LOCALLY BY FASTAPI:
 - Do not try to execute rule references, nested then/catch branches, or agents yourself.
 - The backend validates every proposed match and executes all accepted rules.
-- If multiple accepted rules can respond, backend priority decides which response is authoritative.
+- Multiple rule `respond` outputs are composed locally into one assistant message in priority order.
 - You may still produce an answer for normal reasoning or for reformulatable response rules.
 
 WHEN NO RULE MATCHES:
@@ -391,11 +413,11 @@ AVAILABLE CODE AGENTS:
 """.strip()
 
         user_prompt = f"""
-CONVERSATION CONTEXT:
-{rendered_context or '(none)'}
-
-LATEST USER MESSAGE:
+RULE MATCH TARGET — LATEST USER MESSAGE:
 {user_message}
+
+ANSWER CONTEXT — DO NOT INHERIT PRIOR RULE INTENT FROM THIS SECTION:
+{rendered_context or '(none)'}
 """.strip()
 
         result = await self._complete_assistant_decision(
@@ -416,6 +438,8 @@ LATEST USER MESSAGE:
             match_count=len(payload.get("matched_rules", [])),
             confidence=payload.get("rule_confidence"),
             parse_mode=payload.get("parse_mode"),
+            rule_match_scope="latest_user_message",
+            context_usage="coreference_only_no_intent_inheritance",
             thinking_mode="disabled",
             thinking_control="native_think_false" if self.decision_client else "uncontrolled",
             prompt_layout="system_user",
