@@ -3,12 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from app.flow.events import FlowEmitter, emit_flow
 from app.sessions.models import ChatMessage, ChatSession
 from app.sessions.store import SessionStore
 
 
 class Summarizer(Protocol):
-    async def summarize_context(self, previous_summary: str, messages: list[ChatMessage]) -> str: ...
+    async def summarize_context(
+        self,
+        previous_summary: str,
+        messages: list[ChatMessage],
+        emit: FlowEmitter | None = None,
+    ) -> str: ...
 
 
 @dataclass(slots=True)
@@ -61,9 +67,30 @@ class ContextManager:
         total = self.estimate_tokens(chat.summary) + sum(self.estimate_tokens(m.content) for m in messages)
         return ContextSnapshot(chat=chat, messages=messages, estimated_tokens=total)
 
-    async def compact_if_needed(self, chat_id: str, user_id: str) -> ContextSnapshot:
+    async def compact_if_needed(
+        self,
+        chat_id: str,
+        user_id: str,
+        emit: FlowEmitter | None = None,
+    ) -> ContextSnapshot:
         snapshot = await self.snapshot(chat_id, user_id)
+        await emit_flow(
+            emit,
+            "context.snapshot",
+            estimated_tokens=snapshot.estimated_tokens,
+            compact_at_tokens=self.compact_at_tokens,
+            message_count=len(snapshot.messages),
+            has_summary=bool(snapshot.chat.summary),
+        )
+
         if snapshot.estimated_tokens < self.compact_at_tokens:
+            await emit_flow(
+                emit,
+                "context.compaction.skipped",
+                reason="below_threshold",
+                estimated_tokens=snapshot.estimated_tokens,
+                compact_at_tokens=self.compact_at_tokens,
+            )
             return snapshot
 
         recent: list[ChatMessage] = []
@@ -79,9 +106,24 @@ class ContextManager:
         recent_ids = {m.id for m in recent}
         archived = [m for m in snapshot.messages if m.id not in recent_ids]
         if not archived:
+            await emit_flow(
+                emit,
+                "context.compaction.skipped",
+                reason="nothing_to_archive",
+                estimated_tokens=snapshot.estimated_tokens,
+            )
             return snapshot
 
-        summary = await self.summarizer.summarize_context(snapshot.chat.summary, archived)
+        await emit_flow(
+            emit,
+            "context.compaction.started",
+            before_tokens=snapshot.estimated_tokens,
+            archive_message_count=len(archived),
+            keep_message_count=len(recent),
+            keep_recent_tokens=self.keep_recent_tokens,
+        )
+
+        summary = await self.summarizer.summarize_context(snapshot.chat.summary, archived, emit=emit)
         # Hard safety bound. This is approximate but prevents unbounded rolling summaries.
         max_chars = self.summary_target_tokens * 4
         if len(summary) > max_chars:
@@ -94,4 +136,14 @@ class ContextManager:
             keep_message_ids=[m.id for m in recent],
             estimated_tokens=estimated,
         )
-        return await self.snapshot(chat_id, user_id)
+        compacted = await self.snapshot(chat_id, user_id)
+        await emit_flow(
+            emit,
+            "context.compaction.completed",
+            before_tokens=snapshot.estimated_tokens,
+            after_tokens=compacted.estimated_tokens,
+            archived_message_count=len(archived),
+            kept_message_count=len(recent),
+            summary_estimated_tokens=self.estimate_tokens(summary),
+        )
+        return compacted
