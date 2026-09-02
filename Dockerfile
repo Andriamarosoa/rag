@@ -24,11 +24,15 @@ WORKDIR /app
 
 COPY . /app
 
-RUN python3 -m venv /opt/venv \
-    && pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir . \
-    && sed 's/\r$//' /app/docker-entrypoint.sh > /usr/local/bin/rag-entrypoint \
-    && chmod +x /usr/local/bin/rag-entrypoint
+# Keep each build operation isolated so Docker reports the exact failing step.
+RUN python3 -m venv /opt/venv
+RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN python -m pip install --no-cache-dir .
+RUN python -c "import app; print('[build] Python app package import OK')"
+
+# Normalize Windows CRLF and install the entrypoint outside the read-only /app bind mount.
+RUN sed 's/\r$//' /app/docker-entrypoint.sh > /usr/local/bin/rag-entrypoint \
+    && chmod 0755 /usr/local/bin/rag-entrypoint
 
 EXPOSE 8765
 
