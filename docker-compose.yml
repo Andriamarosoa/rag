@@ -36,7 +36,7 @@ services:
       DATABASE_PATH: /app/data/rag.db
       RULES_PATH: /app/config/rules.json
 
-      # Codex CLI is installed inside this container and launched by the backend over stdio MCP.
+      # Codex remains available in-container for agent/reasoning operations that need it.
       CODEX_COMMAND: codex
       CODEX_ARGS: mcp-server
       CODEX_CWD: /app
@@ -45,6 +45,10 @@ services:
       OPENAI_API_KEY: ollama
       CODEX_SANDBOX: ${CODEX_SANDBOX:-read-only}
       CODEX_APPROVAL_POLICY: never
+
+      # assistant_decision uses Ollama native /api/chat so `think:false` is a real API control.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://100.89.128.87:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:8b}
 
       CONTEXT_COMPACT_AT_TOKENS: ${CONTEXT_COMPACT_AT_TOKENS:-50000}
       CONTEXT_KEEP_RECENT_TOKENS: ${CONTEXT_KEEP_RECENT_TOKENS:-12000}
