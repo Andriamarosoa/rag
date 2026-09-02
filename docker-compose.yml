@@ -1,0 +1,16 @@
+services:
+  mariadb:
+    image: mariadb:11.7
+    container_name: mariadb
+    # restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: rootpassword
+      MARIADB_DATABASE: sicorax
+      MARIADB_USER: myuser
+      MARIADB_PASSWORD: myuserpassword
+      MARIADB_AUTO_UPGRADE: '1'
+    command: --max-allowed-packet=256M
+    ports:
+      - "3307:3306"
+    volumes:
+      - ./mariadb_data:/var/lib/mysql
