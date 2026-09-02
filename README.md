@@ -4,6 +4,8 @@ Prototype backend for a functional assistant where the **frontend can ask arbitr
 
 - a persistent WebSocket chat/session layer;
 - Codex as the local agent/reasoning harness through MCP;
+- Ollama as the configured local model provider behind Codex;
+- a single model pass for semantic rule classification + answer reasoning;
 - rolling context compaction around 50k estimated tokens;
 - functional rules defined in JSON;
 - code-defined agents/actions such as `send_email`;
@@ -30,15 +32,52 @@ FastAPI
    │      └── compacts old context at ~50k tokens
    │
    ├── RuleEngine
-   │      ├── semantic PRE rules
-   │      └── deterministic POST rules
+   │      ├── exposes + validates semantic PRE rules
+   │      ├── enforces accepted rule actions locally
+   │      └── evaluates deterministic POST rules
    │
    ├── AgentRegistry
    │      └── send_email (code)
    │
-   └── CodexGateway
-          └── MCP stdio -> Codex
+   └── CodexService
+          └── one assistant_decision call
+                ├── semantic rule classification
+                ├── answer reasoning
+                └── agent suggestion
+                     │
+                     ▼
+                Codex MCP stdio
+                     │
+                     ▼
+                  Ollama
 ```
+
+For a normal chat request below the context-compaction threshold, the intended model path is therefore:
+
+```text
+User message
+   ↓
+FastAPI
+   ↓
+Codex / Ollama     assistant_decision
+   ↓
+{
+  matched_rule,
+  rule_confidence,
+  status,
+  answer,
+  suggested_agent,
+  suggested_agent_args
+}
+   ↓
+RuleEngine validates/enforces locally
+   ↓
+POST rules + persistence
+   ↓
+WebSocket response
+```
+
+There is no separate `pre_rule_matching` model request followed by a second `assistant_reasoning` request anymore.
 
 ## Important Codex note (September 2026)
 
@@ -83,6 +122,8 @@ CONTEXT_SUMMARY_TARGET_TOKENS=8000
 
 The tokenizer is intentionally model-agnostic and estimates roughly `characters / 4`. Replace `ContextManager.estimate_tokens()` with the tokenizer used by your active local model when exact accounting matters.
 
+Context summarization is the main exception to the one-model-call chat path: if compaction is required, `context_summarization` is an additional Ollama request.
+
 ## Functional rules
 
 Rules live in `config/rules.json`; the code does not contain `if user asks exact phrase A` logic.
@@ -113,7 +154,35 @@ I cannot access my account anymore
 Where do I change my password?
 ```
 
-Codex performs the semantic match. The canonical business answer stays in JSON. This is deliberately based on structured text output rather than native function calling, which keeps the rule layer usable with local models that are good at JSON but weak or unsupported as tool-calling agents.
+Codex/Ollama performs the semantic match **inside the same `assistant_decision` request that also reasons about the answer**. The local RuleEngine then checks the returned rule id/confidence before applying it.
+
+For a `respond` rule:
+
+- `reformulate=false`: FastAPI ignores the model wording and returns `canonical_answer` exactly;
+- `reformulate=true`: the wording already produced during `assistant_decision` is used, with `canonical_answer` as fallback;
+- no second reformulation model call is made.
+
+This keeps mandatory business behavior in JSON while avoiding a second sequential Ollama request.
+
+### Example: deterministic output rule
+
+```json
+{
+  "id": "math_calculation",
+  "phase": "pre",
+  "priority": 200,
+  "description": "The user asks to perform a mathematical calculation.",
+  "when": { "type": "semantic" },
+  "then": {
+    "type": "respond",
+    "canonical_answer": "hahahaha",
+    "reformulate": false,
+    "allow_new_facts": false
+  }
+}
+```
+
+If this rule is accepted, the final answer is enforced locally as exactly `hahahaha`.
 
 ### Example: fallback rule
 
@@ -136,7 +205,7 @@ Codex performs the semantic match. The canonical business answer stays in JSON. 
 }
 ```
 
-This is a **functional state rule**, not a phrase matcher.
+This is a **functional state rule**, not a phrase matcher. POST rules are evaluated locally and do not require an Ollama call.
 
 ## Code-defined agents
 
@@ -181,6 +250,17 @@ ws://localhost:8765/ws
 ```
 
 The server returns the generated `chat_id`. Reuse it on following turns.
+
+### Main model event
+
+A normal request should show one model operation:
+
+```text
+model.request.started    operation=assistant_decision
+model.request.completed  operation=assistant_decision
+```
+
+The model event also reports `provider=codex_ollama` and the configured model name.
 
 ### Example assistant result
 
@@ -279,7 +359,7 @@ GET http://localhost:8765/health
 
 ## Local-model-only setup
 
-This repository does **not** hard-code an OpenAI-hosted model. It invokes the locally installed Codex harness. If your Codex configuration points to your local Ollama provider, the orchestration layer keeps using that Codex configuration.
+This repository does **not** hard-code an OpenAI-hosted model. The Docker entrypoint configures Codex to use the Ollama provider and the remote OpenAI-compatible Ollama endpoint.
 
 Do not store model/API credentials in this repository. Keep them in your local Codex/Ollama configuration or environment.
 
