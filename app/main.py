@@ -10,12 +10,12 @@ from app.agents.email_agent import SendEmailAgent
 from app.agents.registry import AgentRegistry
 from app.agents.skb_search_agent import SkbSearchAgent
 from app.codex.client import CodexMcpClient
-from app.codex.isolated_service import IsolatedDecisionService
+from app.codex.segmented_service import SegmentedDecisionService
 from app.config import settings
 from app.context.manager import ContextManager
 from app.ollama.client import OllamaNativeClient
-from app.orchestrator import Orchestrator
 from app.rules.engine import RuleEngine
+from app.segmented_orchestrator import SegmentedOrchestrator
 from app.sessions.store import SessionStore
 from app.skb.client import SkbClient
 from app.ws.manager import ConnectionManager
@@ -47,7 +47,7 @@ skb_client = SkbClient(
     search_max_pages=settings.skb_search_max_pages,
 )
 skb_search_agent = SkbSearchAgent(skb_client)
-codex = IsolatedDecisionService(codex_client, decision_client=ollama_decision_client)
+codex = SegmentedDecisionService(codex_client, decision_client=ollama_decision_client)
 context_manager = ContextManager(
     store=store,
     summarizer=codex,
@@ -60,7 +60,7 @@ agents = AgentRegistry()
 agents.register(SendEmailAgent(settings))
 agents.register(skb_search_agent)
 manager = ConnectionManager()
-orchestrator = Orchestrator(store, context_manager, rules, agents, codex)
+orchestrator = SegmentedOrchestrator(store, context_manager, rules, agents, codex)
 
 
 @asynccontextmanager
@@ -100,8 +100,9 @@ async def health() -> dict:
         "assistant_decision_provider": "ollama_native",
         "assistant_decision_model": ollama_decision_client.model,
         "assistant_decision_thinking": False,
-        "assistant_decision_pipeline": "isolated_classifier_then_answer",
-        "rule_classifier_context": "latest_user_message_only",
+        "assistant_decision_pipeline": "segmented_isolated_classifier_then_answer",
+        "rule_classifier_context": "latest_user_segments_only",
+        "segment_tracking": True,
         "skb_base_url": skb_client.base_url,
         "skb_module_count": len(skb_search_agent.modules),
     }
