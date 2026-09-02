@@ -46,6 +46,7 @@ class RuleEngine:
         self,
         decision: dict[str, Any],
         emit: FlowEmitter | None = None,
+        decision_elapsed_ms: float | None = None,
     ) -> FunctionalRule | None:
         semantic = self.semantic_pre_rules()
         rule_id = decision.get("matched_rule") or decision.get("rule_id")
@@ -55,8 +56,24 @@ class RuleEngine:
         confidence = float(raw_confidence) if raw_confidence is not None else None
         parse_mode = decision.get("parse_mode")
 
+        timing: dict[str, Any] = {
+            "timing_scope": "integrated_assistant_decision",
+        }
+        if decision_elapsed_ms is not None:
+            timing.update(
+                {
+                    "decision_elapsed_ms": decision_elapsed_ms,
+                    "decision_elapsed_seconds": round(decision_elapsed_ms / 1000, 3),
+                }
+            )
+
         if not semantic:
-            await emit_flow(emit, "rules.pre.no_match", reason="no_semantic_rules")
+            await emit_flow(
+                emit,
+                "rules.pre.no_match",
+                reason="no_semantic_rules",
+                **timing,
+            )
             return None
 
         if not rule_id:
@@ -72,6 +89,7 @@ class RuleEngine:
                 confidence=confidence,
                 threshold=0.65,
                 parse_mode=parse_mode,
+                **timing,
             )
             return None
 
@@ -84,6 +102,7 @@ class RuleEngine:
                 confidence=confidence,
                 threshold=0.65,
                 parse_mode=parse_mode,
+                **timing,
             )
             return None
 
@@ -96,6 +115,7 @@ class RuleEngine:
                 proposed_rule_id=rule_id,
                 confidence=confidence,
                 parse_mode=parse_mode,
+                **timing,
             )
             return None
 
@@ -107,6 +127,7 @@ class RuleEngine:
             priority=matched.priority,
             action_type=matched.then.get("type"),
             parse_mode=parse_mode,
+            **timing,
         )
         return matched
 
