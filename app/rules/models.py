@@ -19,6 +19,25 @@ class FunctionalRule(BaseModel):
     when: dict[str, Any] = Field(default_factory=dict)
     then: list[RuleThenItem] = Field(default_factory=list)
 
+    @field_validator("when", mode="before")
+    @classmethod
+    def normalize_when(cls, value: Any) -> Any:
+        """Give semantic rules a safe conversational matching scope by default.
+
+        Semantic matching targets the latest user turn. Conversation history may resolve
+        references such as "it" or "the administrator", but must not carry a previous
+        rule intent forward into a different follow-up question.
+        """
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        if str(normalized.get("type") or "").strip() == "semantic":
+            normalized.setdefault("scope", "latest_user_message")
+            normalized.setdefault("context_usage", "coreference_only_no_intent_inheritance")
+        return normalized
+
     @field_validator("then", mode="before")
     @classmethod
     def normalize_then(cls, value: Any) -> Any:
