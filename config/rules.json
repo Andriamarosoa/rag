@@ -16,8 +16,7 @@
           "canonical_answer": "hahahaha",
           "reformulate": false,
           "allow_new_facts": false
-        },
-        "no_answer_suggest_email"
+        }
       ]
     },
     {
@@ -35,7 +34,8 @@
           "canonical_answer": "The user must contact their administrator to reset the password.",
           "reformulate": true,
           "allow_new_facts": false
-        }
+        },
+        "no_answer_suggest_email"
       ]
     },
     {
