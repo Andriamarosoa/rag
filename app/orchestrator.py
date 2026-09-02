@@ -14,6 +14,8 @@ from app.sessions.store import SessionStore
 
 
 class Orchestrator:
+    MAX_RULE_REFERENCE_DEPTH = 16
+
     def __init__(
         self,
         store: SessionStore,
@@ -36,17 +38,113 @@ class Orchestrator:
         *,
         source: str,
         allow_model_reformulation: bool,
+        origin_rule_id: str | None = None,
+        reference_stack: tuple[str, ...] = (),
     ) -> None:
-        """Execute a rule's ordered `then` action list locally."""
+        """Execute a rule's ordered `then` list, expanding rule-id references inline.
+
+        A string item in `then` references another enabled rule by id. The referenced rule's
+        `when` is not re-evaluated; only its `then` list is executed. The originally matched
+        rule remains authoritative in `matched_rule` even when referenced rules provide actions.
+        """
         result.setdefault("actions", [])
+        origin_rule_id = origin_rule_id or rule.id
+        stack = (*reference_stack, rule.id)
         action_count = len(rule.then)
 
-        for action_index, action in enumerate(rule.then):
+        for action_index, item in enumerate(rule.then):
+            if isinstance(item, str):
+                referenced_rule_id = item.strip()
+                await emit_flow(
+                    emit,
+                    "rule.reference.started",
+                    rule_id=rule.id,
+                    origin_rule_id=origin_rule_id,
+                    referenced_rule_id=referenced_rule_id or None,
+                    action_index=action_index,
+                    action_count=action_count,
+                    reference_depth=len(reference_stack) + 1,
+                    source=source,
+                )
+
+                if not referenced_rule_id:
+                    await emit_flow(
+                        emit,
+                        "rule.reference.rejected",
+                        rule_id=rule.id,
+                        origin_rule_id=origin_rule_id,
+                        referenced_rule_id=None,
+                        action_index=action_index,
+                        reason="empty_rule_reference",
+                    )
+                    continue
+
+                if referenced_rule_id in stack:
+                    await emit_flow(
+                        emit,
+                        "rule.reference.rejected",
+                        rule_id=rule.id,
+                        origin_rule_id=origin_rule_id,
+                        referenced_rule_id=referenced_rule_id,
+                        action_index=action_index,
+                        reason="cyclic_rule_reference",
+                        reference_path=[*stack, referenced_rule_id],
+                    )
+                    continue
+
+                if len(stack) >= self.MAX_RULE_REFERENCE_DEPTH:
+                    await emit_flow(
+                        emit,
+                        "rule.reference.rejected",
+                        rule_id=rule.id,
+                        origin_rule_id=origin_rule_id,
+                        referenced_rule_id=referenced_rule_id,
+                        action_index=action_index,
+                        reason="max_rule_reference_depth",
+                        max_depth=self.MAX_RULE_REFERENCE_DEPTH,
+                    )
+                    continue
+
+                referenced_rule = self.rules.get_rule(referenced_rule_id)
+                if referenced_rule is None:
+                    await emit_flow(
+                        emit,
+                        "rule.reference.rejected",
+                        rule_id=rule.id,
+                        origin_rule_id=origin_rule_id,
+                        referenced_rule_id=referenced_rule_id,
+                        action_index=action_index,
+                        reason="unknown_or_disabled_rule_reference",
+                    )
+                    continue
+
+                await self._apply_rule_actions(
+                    referenced_rule,
+                    result,
+                    emit,
+                    source="rule_reference",
+                    allow_model_reformulation=allow_model_reformulation,
+                    origin_rule_id=origin_rule_id,
+                    reference_stack=stack,
+                )
+                await emit_flow(
+                    emit,
+                    "rule.reference.completed",
+                    rule_id=rule.id,
+                    origin_rule_id=origin_rule_id,
+                    referenced_rule_id=referenced_rule_id,
+                    action_index=action_index,
+                    action_count=action_count,
+                )
+                continue
+
+            action = item
             action_type = str(action.get("type") or "").strip()
             await emit_flow(
                 emit,
                 "rule.action.started",
                 rule_id=rule.id,
+                origin_rule_id=origin_rule_id,
                 action_type=action_type or None,
                 action_index=action_index,
                 action_count=action_count,
@@ -65,13 +163,14 @@ class Orchestrator:
                     {
                         "status": "answered",
                         "answer": answer,
-                        "matched_rule": rule.id,
+                        "matched_rule": origin_rule_id,
                     }
                 )
                 await emit_flow(
                     emit,
                     "rule.action.completed",
                     rule_id=rule.id,
+                    origin_rule_id=origin_rule_id,
                     action_type="respond",
                     action_index=action_index,
                     action_count=action_count,
@@ -89,6 +188,7 @@ class Orchestrator:
                         emit,
                         "rule.action.unsupported",
                         rule_id=rule.id,
+                        origin_rule_id=origin_rule_id,
                         action_type=action_type,
                         action_index=action_index,
                         action_count=action_count,
@@ -110,6 +210,7 @@ class Orchestrator:
                     "arguments": arguments,
                     "requires_confirmation": requires_confirmation,
                     "rule_id": rule.id,
+                    "origin_rule_id": origin_rule_id,
                 }
                 result["actions"].append(ui_action)
                 await emit_flow(
@@ -118,6 +219,7 @@ class Orchestrator:
                     agent=agent_name,
                     source=source,
                     rule_id=rule.id,
+                    origin_rule_id=origin_rule_id,
                     action_index=action_index,
                     requires_confirmation=requires_confirmation,
                     arguments=arguments,
@@ -126,6 +228,7 @@ class Orchestrator:
                     emit,
                     "rule.action.completed",
                     rule_id=rule.id,
+                    origin_rule_id=origin_rule_id,
                     action_type="suggest_agent",
                     action_index=action_index,
                     action_count=action_count,
@@ -137,6 +240,7 @@ class Orchestrator:
                 emit,
                 "rule.action.unsupported",
                 rule_id=rule.id,
+                origin_rule_id=origin_rule_id,
                 action_type=action_type or None,
                 action_index=action_index,
                 action_count=action_count,
@@ -244,8 +348,6 @@ class Orchestrator:
             )
 
         if pre_rule:
-            # A matched functional rule is authoritative. Model-proposed actions are discarded;
-            # only the ordered actions configured in `then` are applied.
             result["actions"] = []
             result["suggested_agent"] = None
             result["suggested_agent_args"] = {}
@@ -256,6 +358,7 @@ class Orchestrator:
                 emit,
                 source="pre_rule",
                 allow_model_reformulation=True,
+                origin_rule_id=pre_rule.id,
             )
         else:
             result.setdefault("actions", [])
@@ -298,7 +401,7 @@ class Orchestrator:
             await emit_flow(emit, "rules.post.no_match", result_status=result.get("status"))
 
         for rule in post_rules:
-            action_types = [str(action.get("type") or "") for action in rule.then]
+            action_types = self.rules.action_labels(rule)
             await emit_flow(
                 emit,
                 "rules.post.matched",
@@ -313,6 +416,7 @@ class Orchestrator:
                 emit,
                 source="post_rule",
                 allow_model_reformulation=False,
+                origin_rule_id=rule.id,
             )
 
         answer = result.get("answer")
