@@ -5,6 +5,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 
+RuleThenItem = dict[str, Any] | str
+
+
 class FunctionalRule(BaseModel):
     id: str
     enabled: bool = True
@@ -12,7 +15,7 @@ class FunctionalRule(BaseModel):
     priority: int = 0
     description: str = ""
     when: dict[str, Any] = Field(default_factory=dict)
-    then: list[dict[str, Any]] = Field(default_factory=list)
+    then: list[RuleThenItem] = Field(default_factory=list)
 
     @field_validator("then", mode="before")
     @classmethod
@@ -20,7 +23,7 @@ class FunctionalRule(BaseModel):
         """Use an ordered action list while accepting legacy single-action rule files."""
         if value is None:
             return []
-        if isinstance(value, dict):
+        if isinstance(value, (dict, str)):
             return [value]
         return value
 
