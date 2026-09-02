@@ -118,6 +118,40 @@ A semantic pre-rule match includes its `rule_id`, confidence, priority and actio
 
 The event intentionally reports prompt/output sizes rather than prompt contents.
 
+### Performance telemetry
+
+`model.request.started` includes:
+
+```json
+{
+  "provider": "codex_ollama",
+  "model": "qwen3:8b",
+  "operation": "assistant_decision",
+  "prompt_chars": 5100,
+  "prompt_tokens_estimated": 1275,
+  "timing_scope": "codex_to_ollama_round_trip"
+}
+```
+
+`model.request.completed` adds:
+
+```json
+{
+  "output_chars": 240,
+  "output_tokens_estimated": 60,
+  "elapsed_ms": 4580.2,
+  "elapsed_seconds": 4.58,
+  "metrics_source": "application_wall_clock",
+  "native_ollama_eval_metrics_available": false
+}
+```
+
+`elapsed_ms` is an actual wall-clock measurement around the Codex MCP request. It therefore measures the complete `FastAPI -> Codex -> Ollama -> Codex -> FastAPI` model round trip, not Ollama generation alone.
+
+`prompt_tokens_estimated` and `output_tokens_estimated` use the same dependency-free `characters / 4` approximation as the context manager. They are diagnostic estimates, not tokenizer-exact counts.
+
+The current Codex MCP/OpenAI-compatible path does not expose Ollama native `prompt_eval_duration` and `eval_duration` to this application, so those values are deliberately not fabricated. To obtain that exact split later, the application would need native Ollama telemetry or a transport/proxy that preserves those native response metrics.
+
 ## Agent events
 
 When an agent is proposed by the reasoning model or a post-rule:
