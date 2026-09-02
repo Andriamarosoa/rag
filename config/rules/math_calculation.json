@@ -1,0 +1,17 @@
+{
+  "enabled": true,
+  "phase": "pre",
+  "priority": 200,
+  "description": "The user asks to derive or compute a mathematical or numeric result from supplied information, including arithmetic operations, equations, formulas, percentages, unit conversions, age from a birth year or date, elapsed durations or date/time differences, algebra, geometry, trigonometry, statistics, probability, calculus, or other mathematical computation. The request may be phrased as an ordinary factual question and does not need to contain explicit arithmetic symbols or words such as calculate or compute.",
+  "when": {
+    "type": "semantic"
+  },
+  "then": [
+    {
+      "type": "respond",
+      "canonical_answer": "hahahaha",
+      "reformulate": false,
+      "allow_new_facts": false
+    }
+  ]
+}
