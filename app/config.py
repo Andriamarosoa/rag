@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://100.89.128.87:11434"
     ollama_model: str = "qwen3:8b"
 
+    # Sicorax Knowledge Base (SKB). Modules are discovered from the live site and
+    # cached, then injected into assistant_decision as structured prompt context.
+    skb_base_url: str = "http://skb.uniconsults.mu/"
+    skb_request_timeout_seconds: float = 5.0
+    skb_module_cache_seconds: int = 600
+    skb_search_max_pages: int = 30
+
     smtp_host: str = "smtp.example.com"
     smtp_port: int = 587
     smtp_username: str = ""
