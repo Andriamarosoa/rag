@@ -12,7 +12,7 @@ from app.skb.models import (
 )
 
 
-_HEADING_LINE = re.compile(r"^\s*(={2,6})\s*(.*?)\s*\1\s*$")
+_HEADING_LINE = re.compile(r"^\s*(={2,})\s*(.*?)\s*=+\s*$")
 _COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 _CODE_BLOCK = re.compile(r"<(?:code|file)(?:\s+[^>]*)?>(.*?)</(?:code|file)>", re.I | re.S)
 _NOWIKI_BLOCK = re.compile(r"<(?:nowiki)>(.*?)</(?:nowiki)>", re.I | re.S)
@@ -121,7 +121,7 @@ def parse_sections(page: WikiPage) -> list[WikiSection]:
         body = []
         marks, raw_heading = match.groups()
         heading = clean_dokuwiki_markup(raw_heading) or page.title
-        level = 7 - len(marks)
+        level = 7 - min(6, len(marks))
         while heading_stack and heading_stack[-1][0] >= level:
             heading_stack.pop()
         heading_stack.append((level, heading))

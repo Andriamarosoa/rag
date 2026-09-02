@@ -13,7 +13,7 @@ from app.skb.vector_store import MariaDBVectorStore
 class SkbIndexer:
     """Build a complete private generation, then publish it atomically."""
 
-    INDEX_FORMAT_VERSION = "2"
+    INDEX_FORMAT_VERSION = "3"
 
     def __init__(
         self,

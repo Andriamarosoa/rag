@@ -72,7 +72,7 @@ Open:
 
 The health endpoint starts even if an external dependency is unavailable.
 ok=true means the HTTP application is running; also inspect
-skb_index_initialized, skb_index_running, and skb_index_error.
+skb_index_initialized, skb_index_running, skb_index_ready, and skb_index_error.
 
 ## Initial and incremental index sync
 
@@ -102,17 +102,20 @@ Invoke-RestMethod -Method Post "http://localhost:8765/skb/index/sync"
 
 The status object reports:
 
-- initialized and running;
+- initialized, running, and ready;
+- the configured signature and active generation/signature;
 - last start/completion times and last_error;
 - last_result counters such as discovered_pages, fetched_pages,
   unchanged_pages, indexed_pages, failed_pages, embedded_chunks,
   upserted_chunks, and deletions;
 - store.pages, store.chunks, and store.modules.
 
-Sync is hash-based and incremental. The index signature includes the embedding
-model, dimension, and chunk settings, so changing one makes affected pages
-eligible for re-indexing. Missing local pages are deleted only after the
-complete discovery/fetch pass succeeds without page failures.
+Sync is hash-based and incremental for embedding work. Unchanged pages are
+copied into a private staging generation; search reads only the active complete
+generation. The staging generation is atomically activated after a fully
+successful crawl, so a first ingestion or model change cannot expose mixed or
+partial embeddings. A partial fetch is discarded. Removals require two matching
+snapshots and a retention ratio of at least 90% before activation.
 
 ## Verify the strict pipeline
 
@@ -180,7 +183,7 @@ Compose fixes the backend's internal database route to DB_HOST=mariadb and
 DB_PORT=3306. From Windows, MariaDB is exposed on 127.0.0.1:3307.
 
 The vector dimension is a schema contract. The backend refuses an existing
-skb_chunks.embedding column whose dimension differs from
+skb_chunks_v2.embedding column whose dimension differs from
 SKB_EMBEDDING_DIMENSION.
 
 SKB_MODULE_CACHE_SECONDS and SKB_SEARCH_MAX_PAGES belong to the legacy bounded
@@ -226,7 +229,7 @@ credentials beyond isolated local development.
   abstention with no sources.
 - MariaDB, embedding, or Qwen failure during chat: source_unavailable with no
   sources.
-- Invalid or model-invented citation IDs: generated text is discarded and
-  replaced by the abstention.
-- Sync errors appear in /skb/index/status; inspect last_error even when the sync
-  endpoint returned a status document.
+- Invalid citations, non-verbatim evidence quotes, or any unsupported claim:
+  all generated text is discarded and replaced by the abstention.
+- Sync errors appear in /skb/index/status. A synchronous `wait=true` request
+  returns HTTP 502 when the generation could not be activated.

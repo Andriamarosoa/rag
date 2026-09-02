@@ -32,8 +32,8 @@ Browser -> WebSocket chat.message {text, module}
     -> MariaDB cosine retrieval
        (optional module filter, top-k and distance threshold)
     -> Qwen receives only the retrieved SKB chunks
-    -> structured {status, answer, citation_ids}
-    -> application validates citation IDs and skb.uniconsults.mu URLs
+    -> structured atomic claims with citation IDs and exact evidence quotes
+    -> application validates every quote, citation ID, and SKB URL
     -> assistant.completed {answer, sources, ...}
 ```
 
@@ -41,10 +41,10 @@ Important guarantees:
 
 - retrieved wiki text is treated as untrusted reference data, never as
   instructions;
-- Qwen is instructed to support every factual statement from the supplied
-  chunks;
-- the application releases an answered result only when at least one returned
-  citation ID belongs to the retrieved set;
+- Qwen must split its answer into atomic claims, each with an exact excerpt from
+  a retrieved chunk;
+- the application releases a claim only when every evidence quote is found in
+  its cited SKB chunk and every citation ID belongs to the retrieved set;
 - public source URLs are rebuilt from validated chunks and restricted to the SKB
   host;
 - no relevant chunk, invalid JSON, an invalid citation, or an unsupported answer
@@ -119,6 +119,9 @@ The test UI is available at <http://localhost:8765/> and the health endpoint at
 
 The backend creates the MariaDB vector schema and, with
 `SKB_SYNC_ON_STARTUP=true`, starts an incremental SKB sync in the background.
+Every sync builds a private generation and publishes it with one atomic pointer
+change only after the complete crawl succeeds. Until the first generation is
+active, chat safely reports that SKB is unavailable.
 Check progress instead of assuming that the first index is immediately ready:
 
 ```powershell
@@ -188,7 +191,8 @@ GET /skb/index/status
 
 The result contains:
 
-- `initialized` and `running`;
+- `initialized`, `running`, and `ready`;
+- the configured signature and active generation/signature;
 - `last_started_at`, `last_completed_at`, and `last_error`;
 - `last_result` with discovery, fetch, indexing, embedding, deletion, and error
   counters;
@@ -204,13 +208,15 @@ POST /skb/index/sync?wait=true
 
 Without `wait=true`, the endpoint schedules/reuses the background task and
 returns its current status. With it, the request waits for that task and then
-returns the final status. Inspect `last_error`: synchronization errors are
-reported in the status body.
+returns the final status. A failed or deferred synchronization returns HTTP 502
+with the status in its error detail.
 
-Synchronization is incremental. Page and index-signature hashes avoid
-re-embedding unchanged pages. Missing pages are deleted only after a complete,
-failure-free discovery/fetch pass; a partial upstream failure cannot purge the
-local index.
+Synchronization is incremental for embedding work: unchanged pages and vectors
+are copied into a private staging generation. Search continues to read the old
+complete generation until the new one is atomically activated. A partial fetch
+is discarded. Page removals additionally require two identical crawl snapshots
+and at least 90% retention, preventing a truncated HTTP 200 response from
+purging most of the corpus.
 
 ## WebSocket chat
 
@@ -322,6 +328,14 @@ local development. `.env`, database data, and Codex state are ignored by Git.
 
 `SKB_MODULE_CACHE_SECONDS` and `SKB_SEARCH_MAX_PAGES` remain as legacy
 lexical-client settings; they do not control the strict persistent vector index.
+
+### Other URLs
+
+`SKB_BASE_URL` may replace the source with another DokuWiki origin, but the
+current deployment deliberately allows only that one host. Supporting several
+origins simultaneously requires an explicit source registry and a crawler
+adapter per site type; ordinary HTML sites cannot be safely added by merely
+changing the host allowlist.
 
 ## Local Python development
 

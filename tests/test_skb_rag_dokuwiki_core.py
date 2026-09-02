@@ -117,3 +117,18 @@ async def test_raw_export_builds_trusted_canonical_source_metadata():
     assert "export_raw" not in page.source_url
     assert len(page.content_hash) == 64
 
+
+@pytest.mark.asyncio
+async def test_raw_export_cleans_an_oversized_heading_title():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text="=========Reset ESS Password======\nInstructions.",
+            headers={"content-type": "text/plain; charset=utf-8"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = DokuWikiClient("http://skb.uniconsults.mu/", client=http)
+        page = await client.fetch_page("spay:reset")
+
+    assert page.title == "Reset ESS Password"

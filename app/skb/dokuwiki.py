@@ -13,7 +13,7 @@ from app.skb.models import WikiPage, module_for_page_id
 
 
 _SAFE_DOKUWIKI_ID = re.compile(r"^[a-zA-Z0-9_.:-]+$")
-_HEADING = re.compile(r"^\s*={2,6}\s*(.*?)\s*={2,6}\s*$", re.MULTILINE)
+_HEADING = re.compile(r"^\s*=+\s*(.*?)\s*=+\s*$", re.MULTILINE)
 
 
 class DokuWikiError(RuntimeError):
@@ -130,7 +130,8 @@ class DokuWikiClient:
         self.excluded_namespaces = frozenset(
             value.strip(":").casefold() for value in excluded_namespaces
         )
-        self._semaphore = asyncio.Semaphore(max(1, int(concurrency)))
+        self.concurrency = max(1, int(concurrency))
+        self._semaphore = asyncio.Semaphore(self.concurrency)
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             timeout=self.timeout_seconds,
@@ -263,31 +264,40 @@ class DokuWikiClient:
         return namespaces, page_ids
 
     async def discover_page_ids(self) -> list[str]:
-        pending = [""]
+        pending = {""}
         visited: set[str] = set()
         pages: set[str] = set()
 
         while pending:
-            namespace = pending.pop(0)
-            if namespace in visited:
+            batch = sorted(pending)[: self.concurrency]
+            pending.difference_update(batch)
+            batch = [namespace for namespace in batch if namespace not in visited]
+            if not batch:
                 continue
-            if len(visited) >= self.max_namespaces:
+            if len(visited) + len(batch) > self.max_namespaces:
                 raise DokuWikiDiscoveryLimitError(
                     f"DokuWiki namespace limit reached ({self.max_namespaces})"
                 )
-            visited.add(namespace)
+            visited.update(batch)
 
-            response = await self._get(self._index_url(namespace))
-            content_type = response.headers.get("content-type", "").casefold()
-            if "html" not in content_type and not response.text.lstrip().startswith("<"):
-                raise DokuWikiError(f"index is not HTML: {content_type or 'unknown'}")
-            discovered_namespaces, discovered_pages = self._parse_index(response.text)
-            pages.update(discovered_pages)
-            if len(pages) > self.max_pages:
-                raise DokuWikiDiscoveryLimitError(
-                    f"DokuWiki page limit reached ({self.max_pages})"
+            responses = await asyncio.gather(
+                *(self._get(self._index_url(namespace)) for namespace in batch)
+            )
+            for response in responses:
+                content_type = response.headers.get("content-type", "").casefold()
+                if "html" not in content_type and not response.text.lstrip().startswith("<"):
+                    raise DokuWikiError(
+                        f"index is not HTML: {content_type or 'unknown'}"
+                    )
+                discovered_namespaces, discovered_pages = self._parse_index(
+                    response.text
                 )
-            pending.extend(sorted(discovered_namespaces - visited - set(pending)))
+                pages.update(discovered_pages)
+                if len(pages) > self.max_pages:
+                    raise DokuWikiDiscoveryLimitError(
+                        f"DokuWiki page limit reached ({self.max_pages})"
+                    )
+                pending.update(discovered_namespaces - visited)
 
         return sorted(pages)
 

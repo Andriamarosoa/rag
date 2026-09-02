@@ -52,6 +52,15 @@ def test_markup_cleaner_does_not_damage_http_urls():
     assert "//important//" not in cleaned
 
 
+def test_malformed_oversized_dokuwiki_heading_is_still_cleaned():
+    page = _page("=========Reset ESS Password======\nUseful instructions follow here.")
+
+    sections = parse_sections(page)
+
+    assert sections[0].heading == "Reset ESS Password"
+    assert "=" not in sections[0].text
+
+
 def test_chunking_is_deterministic_section_aware_and_bounded():
     body = " ".join(f"sentence-{number}." for number in range(250))
     page = _page(f"====== Payroll test ======\n{body}")
