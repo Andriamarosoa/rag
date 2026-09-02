@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
 
 from app.agents.email_agent import SendEmailAgent
 from app.agents.registry import AgentRegistry
@@ -16,6 +18,9 @@ from app.sessions.store import SessionStore
 from app.ws.manager import ConnectionManager
 from app.ws.router import build_router
 
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+INDEX_HTML = ROOT_DIR / "index.html"
 
 store = SessionStore(settings.database_path)
 codex_client = CodexMcpClient(
@@ -53,6 +58,11 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="RAG WebSocket Orchestrator", version="0.1.0", lifespan=lifespan)
 app.include_router(build_router(manager, orchestrator, agents, rules))
+
+
+@app.get("/", include_in_schema=False)
+async def test_ui() -> FileResponse:
+    return FileResponse(INDEX_HTML)
 
 
 @app.get("/health")
