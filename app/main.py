@@ -10,7 +10,7 @@ from app.agents.email_agent import SendEmailAgent
 from app.agents.registry import AgentRegistry
 from app.agents.skb_search_agent import SkbSearchAgent
 from app.codex.client import CodexMcpClient
-from app.codex.service import CodexService
+from app.codex.isolated_service import IsolatedDecisionService
 from app.config import settings
 from app.context.manager import ContextManager
 from app.ollama.client import OllamaNativeClient
@@ -47,7 +47,7 @@ skb_client = SkbClient(
     search_max_pages=settings.skb_search_max_pages,
 )
 skb_search_agent = SkbSearchAgent(skb_client)
-codex = CodexService(codex_client, decision_client=ollama_decision_client)
+codex = IsolatedDecisionService(codex_client, decision_client=ollama_decision_client)
 context_manager = ContextManager(
     store=store,
     summarizer=codex,
@@ -70,7 +70,7 @@ async def lifespan(_: FastAPI):
 
     # SKB is external runtime data. Failure to reach it must not prevent the assistant
     # from starting; when reachable, discovered modules become part of search_skb's
-    # input schema, which is already included in the assistant_decision prompt.
+    # input schema, which is included in answer reasoning.
     try:
         await skb_search_agent.refresh_modules(force_refresh=True)
     except Exception:
@@ -100,6 +100,8 @@ async def health() -> dict:
         "assistant_decision_provider": "ollama_native",
         "assistant_decision_model": ollama_decision_client.model,
         "assistant_decision_thinking": False,
+        "assistant_decision_pipeline": "isolated_classifier_then_answer",
+        "rule_classifier_context": "latest_user_message_only",
         "skb_base_url": skb_client.base_url,
         "skb_module_count": len(skb_search_agent.modules),
     }
