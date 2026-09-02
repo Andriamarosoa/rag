@@ -38,15 +38,36 @@ class FunctionalRule(BaseModel):
             normalized.setdefault("context_usage", "coreference_only_no_intent_inheritance")
         return normalized
 
+    @classmethod
+    def _annotate_response_policy(cls, value: Any) -> Any:
+        if isinstance(value, list):
+            return [cls._annotate_response_policy(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+
+        normalized = dict(value)
+        if str(normalized.get("type") or "").strip() == "respond":
+            normalized.setdefault("answer_scope", "full_latest_user_message")
+            normalized.setdefault(
+                "uncovered_request_policy",
+                "also_answer_other_requests_in_the_latest_user_message_not_covered_by_this_rule",
+            )
+
+        if "then" in normalized:
+            normalized["then"] = cls._annotate_response_policy(normalized["then"])
+        if "catch" in normalized:
+            normalized["catch"] = cls._annotate_response_policy(normalized["catch"])
+        return normalized
+
     @field_validator("then", mode="before")
     @classmethod
     def normalize_then(cls, value: Any) -> Any:
-        """Canonicalize top-level `then` to a list while accepting object/string shorthand."""
+        """Canonicalize top-level `then` and annotate response coverage semantics."""
         if value is None:
             return []
         if isinstance(value, (dict, str)):
-            return [value]
-        return value
+            value = [value]
+        return cls._annotate_response_policy(value)
 
 
 class RuleFile(BaseModel):
