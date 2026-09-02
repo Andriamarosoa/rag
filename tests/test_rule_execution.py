@@ -154,3 +154,56 @@ async def test_catch_runs_when_referenced_rule_fails():
     assert success is True
     assert result["answer"] == "fallback"
     assert result["matched_rule"] == "root"
+
+
+async def test_lower_priority_rule_cannot_overwrite_first_pre_rule_response():
+    high = FunctionalRule.model_validate(
+        {
+            "id": "high",
+            "phase": "pre",
+            "priority": 200,
+            "when": {"type": "semantic"},
+            "then": {"type": "respond", "canonical_answer": "high answer"},
+        }
+    )
+    low = FunctionalRule.model_validate(
+        {
+            "id": "low",
+            "phase": "pre",
+            "priority": 100,
+            "when": {"type": "semantic"},
+            "then": [
+                {"type": "respond", "canonical_answer": "low answer"},
+                {"type": "suggest_agent", "agent": "send_email"},
+            ],
+        }
+    )
+    orchestrator = make_orchestrator([high, low])
+    result = {
+        "status": "answered",
+        "answer": "model answer",
+        "actions": [],
+        "matched_rule": "high",
+        "_pre_rule_batch_active": True,
+    }
+
+    assert await orchestrator._apply_rule_actions(
+        high,
+        result,
+        None,
+        source="pre_rule",
+        allow_model_reformulation=False,
+        origin_rule_id="high",
+    )
+    assert await orchestrator._apply_rule_actions(
+        low,
+        result,
+        None,
+        source="pre_rule",
+        allow_model_reformulation=False,
+        origin_rule_id="low",
+    )
+
+    assert result["answer"] == "high answer"
+    assert result["matched_rule"] == "high"
+    assert result["actions"][0]["agent"] == "send_email"
