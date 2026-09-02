@@ -34,7 +34,7 @@ services:
       APP_HOST: 0.0.0.0
       APP_PORT: ${APP_PORT:-8765}
       DATABASE_PATH: /app/data/rag.db
-      RULES_PATH: /app/config/rules.json
+      RULES_PATH: /app/config/rules
 
       # Codex remains available in-container for agent/reasoning operations that need it.
       CODEX_COMMAND: codex
