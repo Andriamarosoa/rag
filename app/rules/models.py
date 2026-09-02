@@ -5,6 +5,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 
+# A rule node can be a concrete/control object or a short rule-id reference string.
+# Objects may recursively contain `then` and `catch`, and may reference another rule with `ref`.
 RuleThenItem = dict[str, Any] | str
 
 
@@ -20,7 +22,7 @@ class FunctionalRule(BaseModel):
     @field_validator("then", mode="before")
     @classmethod
     def normalize_then(cls, value: Any) -> Any:
-        """Use an ordered action list while accepting legacy single-action rule files."""
+        """Canonicalize top-level `then` to a list while accepting object/string shorthand."""
         if value is None:
             return []
         if isinstance(value, (dict, str)):
