@@ -29,6 +29,24 @@ class RuleEngine:
     def rules(self) -> RuleFile:
         return self._rules or self.reload()
 
+    def get_rule(self, rule_id: str, *, include_disabled: bool = False) -> FunctionalRule | None:
+        rule = next((candidate for candidate in self.rules.rules if candidate.id == rule_id), None)
+        if rule is None:
+            return None
+        if not include_disabled and not rule.enabled:
+            return None
+        return rule
+
+    @staticmethod
+    def action_labels(rule: FunctionalRule) -> list[str]:
+        labels: list[str] = []
+        for item in rule.then:
+            if isinstance(item, str):
+                labels.append(f"rule:{item}")
+            elif isinstance(item, dict):
+                labels.append(str(item.get("type") or ""))
+        return labels
+
     def semantic_pre_rules(self) -> list[FunctionalRule]:
         return sorted(
             [
@@ -121,7 +139,7 @@ class RuleEngine:
             )
             return None
 
-        action_types = [str(action.get("type") or "") for action in matched.then]
+        action_types = self.action_labels(matched)
         await emit_flow(
             emit,
             "rules.pre.matched",
