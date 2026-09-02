@@ -14,6 +14,7 @@
       "type": "suggest_agent",
       "agent": "send_email",
       "label": "Send an email",
+      "post-message": "you can click to this link to",
       "requires_confirmation": true
     }
   ]
