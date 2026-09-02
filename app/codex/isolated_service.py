@@ -63,10 +63,20 @@ class IsolatedDecisionService(CodexService):
                         {"type": "null"},
                     ]
                 },
+                "unresolved_requests": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
                 "suggested_agent": cls._nullable_enum(valid_agent_names),
                 "suggested_agent_args": {"type": "object"},
             },
-            "required": ["status", "answer", "suggested_agent", "suggested_agent_args"],
+            "required": [
+                "status",
+                "answer",
+                "unresolved_requests",
+                "suggested_agent",
+                "suggested_agent_args",
+            ],
             "additionalProperties": False,
         }
 
@@ -82,6 +92,21 @@ class IsolatedDecisionService(CodexService):
             IsolatedDecisionService._contains_reformulatable_respond(node.get("then"))
             or IsolatedDecisionService._contains_reformulatable_respond(node.get("catch"))
         )
+
+    @staticmethod
+    def _normalize_unresolved_requests(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        unresolved: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            text = " ".join(str(item or "").split()).strip()
+            key = text.casefold()
+            if not text or key in seen:
+                continue
+            seen.add(key)
+            unresolved.append(text)
+        return unresolved
 
     async def _native_json_operation(
         self,
@@ -231,7 +256,8 @@ You are a semantic functional-rule classifier.
 ABSOLUTE ISOLATION RULES:
 - Classify ONLY the latest user message supplied below.
 - You have no conversation history and must not assume any previous user intent.
-- Compare every clause/request in the latest message independently with every rule.
+- Compare every sentence, clause, question, and request in the latest message independently with every rule.
+- Every sentence/clause/request is important; do not collapse multiple requests into one intent.
 - Return every applicable rule, ordered by priority descending.
 - Return an explicit confidence from 0 to 1 for EVERY proposed rule. Never use null.
 - `has_uncovered_request` is true when any request/question in the latest message is not covered
@@ -286,6 +312,7 @@ SEMANTIC RULES:
         answer_payload: dict[str, Any] = {
             "status": "answered" if matches else "insufficient_information",
             "answer": None,
+            "unresolved_requests": [],
             "suggested_agent": None,
             "suggested_agent_args": {},
         }
@@ -308,11 +335,16 @@ FROZEN MATCHED RULES:
 {json.dumps(selected_rules, ensure_ascii=False)}
 
 ANSWER REQUIREMENTS:
-- Answer the entire latest user message naturally.
+- Treat every sentence, clause, question, and request in the latest user message as independently important.
+- Answer the entire latest user message naturally; never silently drop one request because another was answered.
 - Use conversation context for factual/coreference continuity only.
 - If a frozen rule requires a response outcome, preserve that required outcome.
 - Also answer every request not covered by the frozen rules.
-- Do not invent unavailable facts. Use not_found/insufficient_information when appropriate.
+- `unresolved_requests` MUST contain every request/question for which you cannot provide a reliable factual answer.
+- If your answer says or implies "I don't know", "I cannot provide", "not enough information", or equivalent
+  for a request, that request MUST appear in `unresolved_requests` even when overall status is `answered`.
+- Leave `unresolved_requests` empty only when every request in the latest message has been reliably answered.
+- Do not invent unavailable facts. Use not_found/insufficient_information when the whole response is unresolved.
 - You may suggest at most one available read-only/code agent when useful, but never claim it ran.
 
 AVAILABLE CODE AGENTS:
@@ -341,6 +373,9 @@ CONVERSATION CONTEXT:
                 answer = parsed_answer.get("answer")
                 if answer is not None and not isinstance(answer, str):
                     answer = str(answer)
+                unresolved_requests = self._normalize_unresolved_requests(
+                    parsed_answer.get("unresolved_requests")
+                )
                 suggested_agent = parsed_answer.get("suggested_agent")
                 if suggested_agent not in valid_agent_names:
                     suggested_agent = None
@@ -350,9 +385,18 @@ CONVERSATION CONTEXT:
                 answer_payload = {
                     "status": status,
                     "answer": answer,
+                    "unresolved_requests": unresolved_requests,
                     "suggested_agent": suggested_agent,
                     "suggested_agent_args": suggested_args,
                 }
+
+        unresolved_requests = self._normalize_unresolved_requests(
+            answer_payload.get("unresolved_requests")
+        )
+        has_unanswered_requests = bool(unresolved_requests) or answer_payload["status"] in {
+            "not_found",
+            "insufficient_information",
+        }
 
         primary = matches[0] if matches else None
         return {
@@ -361,6 +405,8 @@ CONVERSATION CONTEXT:
             "rule_confidence": primary["confidence"] if primary else None,
             "status": answer_payload["status"],
             "answer": answer_payload["answer"],
+            "unresolved_requests": unresolved_requests,
+            "has_unanswered_requests": has_unanswered_requests,
             "suggested_agent": answer_payload["suggested_agent"],
             "suggested_agent_args": answer_payload["suggested_agent_args"],
             "parse_mode": parse_mode,
