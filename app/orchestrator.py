@@ -8,6 +8,7 @@ from app.codex.service import CodexService
 from app.context.manager import ContextManager
 from app.flow.events import FlowEmitter, emit_flow
 from app.rules.engine import RuleEngine
+from app.rules.models import FunctionalRule
 from app.sessions.models import ChatMessage
 from app.sessions.store import SessionStore
 
@@ -26,6 +27,121 @@ class Orchestrator:
         self.rules = rules
         self.agents = agents
         self.codex = codex
+
+    async def _apply_rule_actions(
+        self,
+        rule: FunctionalRule,
+        result: dict[str, Any],
+        emit: FlowEmitter | None,
+        *,
+        source: str,
+        allow_model_reformulation: bool,
+    ) -> None:
+        """Execute a rule's ordered `then` action list locally."""
+        result.setdefault("actions", [])
+        action_count = len(rule.then)
+
+        for action_index, action in enumerate(rule.then):
+            action_type = str(action.get("type") or "").strip()
+            await emit_flow(
+                emit,
+                "rule.action.started",
+                rule_id=rule.id,
+                action_type=action_type or None,
+                action_index=action_index,
+                action_count=action_count,
+                source=source,
+            )
+
+            if action_type == "respond":
+                canonical = str(action.get("canonical_answer", ""))
+                reformulate = bool(action.get("reformulate", False))
+                if reformulate and allow_model_reformulation and result.get("answer"):
+                    answer = str(result["answer"]).strip()
+                else:
+                    answer = canonical
+
+                result.update(
+                    {
+                        "status": "answered",
+                        "answer": answer,
+                        "matched_rule": rule.id,
+                    }
+                )
+                await emit_flow(
+                    emit,
+                    "rule.action.completed",
+                    rule_id=rule.id,
+                    action_type="respond",
+                    action_index=action_index,
+                    action_count=action_count,
+                    status="answered",
+                    reformulate=reformulate,
+                    second_model_call=False,
+                )
+                continue
+
+            if action_type == "suggest_agent":
+                agent_name = str(action.get("agent") or "").strip()
+                agent = self.agents.get(agent_name) if agent_name else None
+                if agent is None:
+                    await emit_flow(
+                        emit,
+                        "rule.action.unsupported",
+                        rule_id=rule.id,
+                        action_type=action_type,
+                        action_index=action_index,
+                        action_count=action_count,
+                        reason="unknown_agent",
+                        agent=agent_name or None,
+                    )
+                    continue
+
+                arguments = action.get("arguments")
+                if not isinstance(arguments, dict):
+                    arguments = {}
+                requires_confirmation = bool(
+                    action.get("requires_confirmation", agent.spec.requires_confirmation)
+                )
+                ui_action = {
+                    "type": "suggest_agent",
+                    "agent": agent_name,
+                    "label": action.get("label", agent_name.replace("_", " ").title()),
+                    "arguments": arguments,
+                    "requires_confirmation": requires_confirmation,
+                    "rule_id": rule.id,
+                }
+                result["actions"].append(ui_action)
+                await emit_flow(
+                    emit,
+                    "agent.suggested",
+                    agent=agent_name,
+                    source=source,
+                    rule_id=rule.id,
+                    action_index=action_index,
+                    requires_confirmation=requires_confirmation,
+                    arguments=arguments,
+                )
+                await emit_flow(
+                    emit,
+                    "rule.action.completed",
+                    rule_id=rule.id,
+                    action_type="suggest_agent",
+                    action_index=action_index,
+                    action_count=action_count,
+                    status="suggested",
+                )
+                continue
+
+            await emit_flow(
+                emit,
+                "rule.action.unsupported",
+                rule_id=rule.id,
+                action_type=action_type or None,
+                action_index=action_index,
+                action_count=action_count,
+                reason="unsupported_action_type",
+            )
 
     async def handle_message(
         self,
@@ -83,7 +199,6 @@ class Orchestrator:
             integrated_rule_matching=True,
         )
 
-        # One model call performs semantic rule selection and normal answer reasoning together.
         result = await self.codex.answer_with_rules(
             user_message=text,
             rendered_context=rendered_context,
@@ -101,9 +216,6 @@ class Orchestrator:
             decision_elapsed_ms=rule_decision_elapsed_ms,
         )
 
-        # If the model generated an answer while assuming a rule that the local rule engine
-        # rejects (for example because confidence is below threshold), that answer must not
-        # leak through as if the rule had been accepted.
         if proposed_rule_id and pre_rule is None:
             result.update(
                 {
@@ -131,54 +243,21 @@ class Orchestrator:
                 thread_id=result["thread_id"],
             )
 
-        if pre_rule and pre_rule.then.get("type") == "respond":
-            canonical = str(pre_rule.then.get("canonical_answer", ""))
-            reformulate = bool(pre_rule.then.get("reformulate", False))
-            await emit_flow(
+        if pre_rule:
+            # A matched functional rule is authoritative. Model-proposed actions are discarded;
+            # only the ordered actions configured in `then` are applied.
+            result["actions"] = []
+            result["suggested_agent"] = None
+            result["suggested_agent_args"] = {}
+            result["matched_rule"] = pre_rule.id
+            await self._apply_rule_actions(
+                pre_rule,
+                result,
                 emit,
-                "rule.action.started",
-                rule_id=pre_rule.id,
-                action_type="respond",
-                reformulate=reformulate,
-                source="integrated_model_decision",
-            )
-
-            # No second model request here. For exact rules the backend always wins. For
-            # reformulatable rules, the wording generated during the integrated pass is used,
-            # with the canonical answer as a safe fallback if the model omitted it.
-            if reformulate:
-                model_answer = result.get("answer")
-                answer = str(model_answer).strip() if model_answer else canonical
-            else:
-                answer = canonical
-
-            result.update(
-                {
-                    "status": "answered",
-                    "answer": answer,
-                    "matched_rule": pre_rule.id,
-                    "actions": [],
-                    "suggested_agent": None,
-                    "suggested_agent_args": {},
-                }
-            )
-            await emit_flow(
-                emit,
-                "rule.action.completed",
-                rule_id=pre_rule.id,
-                action_type="respond",
-                status="answered",
-                second_model_call=False,
+                source="pre_rule",
+                allow_model_reformulation=True,
             )
         else:
-            if pre_rule:
-                await emit_flow(
-                    emit,
-                    "rule.action.unsupported",
-                    rule_id=pre_rule.id,
-                    action_type=pre_rule.then.get("type"),
-                )
-
             result.setdefault("actions", [])
             suggested = result.get("suggested_agent")
             if suggested and self.agents.get(suggested):
@@ -219,32 +298,22 @@ class Orchestrator:
             await emit_flow(emit, "rules.post.no_match", result_status=result.get("status"))
 
         for rule in post_rules:
+            action_types = [str(action.get("type") or "") for action in rule.then]
             await emit_flow(
                 emit,
                 "rules.post.matched",
                 rule_id=rule.id,
-                action_type=rule.then.get("type"),
+                action_type=action_types[0] if action_types else None,
+                action_types=action_types,
+                action_count=len(rule.then),
             )
-            then = rule.then
-            if then.get("type") == "suggest_agent" and self.agents.get(str(then.get("agent"))):
-                action = {
-                    "type": "suggest_agent",
-                    "agent": then["agent"],
-                    "label": then.get("label", then["agent"]),
-                    "arguments": {},
-                    "requires_confirmation": bool(then.get("requires_confirmation", True)),
-                    "rule_id": rule.id,
-                }
-                result["actions"].append(action)
-                await emit_flow(
-                    emit,
-                    "agent.suggested",
-                    agent=then["agent"],
-                    source="post_rule",
-                    rule_id=rule.id,
-                    requires_confirmation=action["requires_confirmation"],
-                    arguments={},
-                )
+            await self._apply_rule_actions(
+                rule,
+                result,
+                emit,
+                source="post_rule",
+                allow_model_reformulation=False,
+            )
 
         answer = result.get("answer")
         if not answer and result.get("status") in {"not_found", "insufficient_information"}:
