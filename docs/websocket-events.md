@@ -16,7 +16,7 @@ Every server message uses the same envelope:
 
 ## Typical chat flow
 
-A normal request can produce this sequence:
+A normal request now uses one model pass for semantic pre-rule classification and assistant reasoning:
 
 ```text
 assistant.started
@@ -29,24 +29,22 @@ context.compaction.skipped | context.compaction.started
   model.request.completed
   context.compaction.completed
 context.ready
-rules.pre.started
-model.request.started            operation=pre_rule_matching
-model.request.completed
+rules.pre.started                integrated_with_reasoning=true
+reasoning.started                integrated_rule_matching=true
+model.request.started            operation=assistant_decision
+model.request.completed          operation=assistant_decision
+rules.pre.decision_parsed
 rules.pre.matched | rules.pre.no_match
 
 # If a rule directly answers:
 rule.action.started
-model.request.started            operation=rule_answer_reformulation (optional)
-model.request.completed          (optional)
-rule.action.completed
+rule.action.completed            second_model_call=false
 
-# Otherwise:
-reasoning.started
-model.request.started            operation=assistant_reasoning
-model.request.completed
-reasoning.completed
+# If no direct-answer rule matched, the normal answer was already produced by
+# the same assistant_decision model request above.
 agent.suggested                  (optional)
 session.codex_thread.updated     (optional)
+reasoning.completed
 
 rules.post.started
 rules.post.matched | rules.post.no_match
@@ -58,6 +56,8 @@ context.compaction.skipped | context.compaction.started/completed
 flow.completed
 assistant.completed
 ```
+
+Except for context compaction when the token threshold is crossed, a normal chat request therefore produces a single `model.request.started/completed` pair.
 
 ## Connection and control events
 
@@ -91,6 +91,7 @@ No full context or prompt is emitted in these events; only metadata such as toke
 ## Rule events
 
 - `rules.pre.started`
+- `rules.pre.decision_parsed`
 - `rules.pre.matched`
 - `rules.pre.no_match`
 - `rule.action.started`
@@ -100,7 +101,7 @@ No full context or prompt is emitted in these events; only metadata such as toke
 - `rules.post.matched`
 - `rules.post.no_match`
 
-A semantic pre-rule match includes its `rule_id`, confidence, priority and action type.
+A semantic pre-rule match includes its `rule_id`, confidence, priority and action type. The rule engine does not call a model itself; it validates the rule decision returned by `assistant_decision` and enforces the configured action locally.
 
 ## Model events
 
@@ -110,12 +111,10 @@ A semantic pre-rule match includes its `rule_id`, confidence, priority and actio
 - `reasoning.started`
 - `reasoning.completed`
 
-`model.request.*` includes an `operation` field so the UI can distinguish:
+`model.request.*` includes `provider`, `model`, and `operation`. The main chat operation is now:
 
-- `pre_rule_matching`
-- `assistant_reasoning`
-- `rule_answer_reformulation`
-- `context_summarization`
+- `assistant_decision` — semantic rule classification + answer reasoning in one Ollama pass through Codex
+- `context_summarization` — only when rolling context compaction is required
 
 The event intentionally reports prompt/output sizes rather than prompt contents.
 
@@ -137,10 +136,11 @@ Write agents can still require `confirmed=true` before their code is allowed to 
 ## Example: no answer -> email suggestion
 
 ```text
-rules.pre.no_match
+rules.pre.started
 reasoning.started
-model.request.started
-model.request.completed
+model.request.started            operation=assistant_decision
+model.request.completed          operation=assistant_decision
+rules.pre.no_match
 reasoning.completed              status=insufficient_information
 rules.post.started
 rules.post.matched               rule_id=no_answer_suggest_email
@@ -151,4 +151,20 @@ flow.completed
 assistant.completed
 ```
 
-The frontend can therefore render the complete decision path without inspecting or parsing the assistant answer.
+## Example: deterministic math rule
+
+```text
+rules.pre.started
+reasoning.started
+model.request.started            operation=assistant_decision
+model.request.completed          operation=assistant_decision
+rules.pre.matched                rule_id=math_calculation
+rule.action.started
+rule.action.completed            second_model_call=false
+reasoning.completed
+message.assistant.persisted
+flow.completed
+assistant.completed
+```
+
+The response is then enforced locally from the rule's canonical answer (`hahahaha`); no reformulation request is made.
