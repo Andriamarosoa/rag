@@ -8,10 +8,11 @@
     :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; background: #0b1020; color: #e8ecf4; }
-    .wrap { width: min(1180px, calc(100% - 32px)); margin: 28px auto; }
+    .wrap { width: min(1280px, calc(100% - 32px)); margin: 28px auto; }
     h1 { margin: 0 0 6px; font-size: 28px; }
+    h2 { margin: 0 0 14px; }
     .sub { margin: 0 0 24px; color: #9ca8bd; }
-    .grid { display: grid; grid-template-columns: 1.1fr .9fr; gap: 18px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
     .card { background: #121a2d; border: 1px solid #26324c; border-radius: 14px; padding: 18px; box-shadow: 0 10px 30px rgba(0,0,0,.2); }
     .row { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; }
     .field { flex: 1 1 180px; }
@@ -26,11 +27,20 @@
     .status { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; padding: 6px 10px; border-radius: 999px; background: #202a41; }
     .dot { width: 9px; height: 9px; border-radius: 50%; background: #e05c6f; }
     .status.connected .dot { background: #51d88a; }
-    .messages { height: 430px; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding-right: 4px; }
+    .messages { height: 420px; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding-right: 4px; }
     .msg { padding: 11px 13px; border-radius: 10px; background: #0d1425; border: 1px solid #26324c; white-space: pre-wrap; word-break: break-word; }
     .msg.user { border-color: #425fc7; }
     .msg.assistant { border-color: #2e8b64; }
     .msg.system { color: #aeb9cb; font-size: 13px; }
+    .timeline { max-height: 420px; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+    .flow { border-left: 3px solid #6f8cff; background: #0d1425; border-radius: 7px; padding: 9px 11px; }
+    .flow.success { border-left-color: #51d88a; }
+    .flow.error { border-left-color: #e05c6f; }
+    .flow.rule { border-left-color: #d9a441; }
+    .flow.agent { border-left-color: #b674e8; }
+    .flow.context { border-left-color: #4cb9c7; }
+    .flow .type { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; font-weight: 700; }
+    .flow .data { margin-top: 4px; color: #9ca8bd; font-size: 11px; white-space: pre-wrap; word-break: break-word; }
     .event { margin-bottom: 8px; border: 1px solid #26324c; border-radius: 8px; background: #090f1d; }
     .event summary { cursor: pointer; padding: 9px 11px; color: #b9c5d8; }
     .event pre { margin: 0; padding: 0 11px 11px; overflow: auto; color: #d6def0; font-size: 12px; }
@@ -40,28 +50,19 @@
     .small { color: #8f9bb0; font-size: 12px; }
     .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
     code { color: #a9bdff; }
-    @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } .messages { height: 320px; } }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } .messages, .timeline { height: 320px; } }
   </style>
 </head>
 <body>
 <div class="wrap">
   <h1>RAG WebSocket Tester</h1>
-  <p class="sub">Test du WebSocket, des sessions, des rules et des agents du backend.</p>
+  <p class="sub">Chaque étape du backend est envoyée comme un événement WebSocket typé.</p>
 
   <div class="card" style="margin-bottom:18px">
     <div class="row">
-      <div class="field" style="flex:2 1 340px">
-        <label for="wsUrl">WebSocket URL</label>
-        <input id="wsUrl" />
-      </div>
-      <div class="field">
-        <label for="userId">User ID</label>
-        <input id="userId" value="demo-user" />
-      </div>
-      <div class="field">
-        <label for="chatId">Chat ID (optionnel)</label>
-        <input id="chatId" placeholder="créé automatiquement" />
-      </div>
+      <div class="field" style="flex:2 1 340px"><label for="wsUrl">WebSocket URL</label><input id="wsUrl" /></div>
+      <div class="field"><label for="userId">User ID</label><input id="userId" value="demo-user" /></div>
+      <div class="field"><label for="chatId">Chat ID (optionnel)</label><input id="chatId" placeholder="créé automatiquement" /></div>
       <button id="connectBtn">Connecter</button>
       <button id="disconnectBtn" class="danger" disabled>Déconnecter</button>
     </div>
@@ -73,7 +74,7 @@
 
   <div class="grid">
     <section class="card">
-      <h2 style="margin-top:0">Chat</h2>
+      <h2>Chat</h2>
       <div id="messages" class="messages"></div>
       <div style="margin-top:14px">
         <textarea id="message" placeholder="Ex: J'ai oublié mon mot de passe, comment le réinitialiser ?"></textarea>
@@ -87,25 +88,29 @@
     </section>
 
     <section class="card">
-      <h2 style="margin-top:0">Actions / Agents</h2>
+      <h2>Flow en temps réel</h2>
+      <div id="timeline" class="timeline"></div>
+    </section>
+
+    <section class="card">
+      <h2>Actions / Agents</h2>
       <div class="tools">
         <div class="tool">
           <strong>send_email</strong>
           <p class="small">Teste l'agent email. L'envoi nécessite explicitement <code>confirmed=true</code>.</p>
-          <label>To</label>
-          <input id="emailTo" value="test@example.com" />
-          <label style="margin-top:8px">Subject</label>
-          <input id="emailSubject" value="Test RAG" />
-          <label style="margin-top:8px">Body</label>
-          <textarea id="emailBody">Bonjour, ceci est un test depuis l'interface WebSocket RAG.</textarea>
+          <label>To</label><input id="emailTo" value="test@example.com" />
+          <label style="margin-top:8px">Subject</label><input id="emailSubject" value="Test RAG" />
+          <label style="margin-top:8px">Body</label><textarea id="emailBody">Bonjour, ceci est un test depuis l'interface WebSocket RAG.</textarea>
           <div class="actions">
             <button id="emailPreviewBtn" class="secondary" disabled>Exécuter sans confirmation</button>
             <button id="emailConfirmBtn" disabled>Confirmer & exécuter</button>
           </div>
         </div>
       </div>
+    </section>
 
-      <h2>Événements WebSocket</h2>
+    <section class="card">
+      <h2>Événements WebSocket bruts</h2>
       <div id="events"></div>
     </section>
   </div>
@@ -118,6 +123,7 @@
   const connectionId = $('connectionId');
   const messages = $('messages');
   const events = $('events');
+  const timeline = $('timeline');
   let socket = null;
 
   const defaultWs = location.protocol === 'https:'
@@ -127,13 +133,8 @@
       : 'ws://localhost:8000/ws';
   wsUrl.value = defaultWs;
 
-  function requestId() {
-    return (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
-  }
-
-  function connected() {
-    return socket && socket.readyState === WebSocket.OPEN;
-  }
+  function requestId() { return crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`; }
+  function connected() { return socket && socket.readyState === WebSocket.OPEN; }
 
   function setConnected(value) {
     statusEl.classList.toggle('connected', value);
@@ -149,6 +150,30 @@
     div.textContent = text;
     messages.appendChild(div);
     messages.scrollTop = messages.scrollHeight;
+  }
+
+  function flowClass(type) {
+    if (type.includes('failed') || type === 'error') return 'error';
+    if (type.includes('completed') || type.includes('ready')) return 'success';
+    if (type.startsWith('rules.') || type.startsWith('rule.')) return 'rule';
+    if (type.startsWith('agent.')) return 'agent';
+    if (type.startsWith('context.')) return 'context';
+    return '';
+  }
+
+  function addFlow(payload) {
+    const div = document.createElement('div');
+    div.className = `flow ${flowClass(payload.type || '')}`;
+    const type = document.createElement('div');
+    type.className = 'type';
+    type.textContent = payload.type || 'unknown';
+    const data = document.createElement('div');
+    data.className = 'data';
+    const compact = payload.data && Object.keys(payload.data).length ? JSON.stringify(payload.data) : '';
+    data.textContent = compact;
+    div.append(type, data);
+    timeline.appendChild(div);
+    timeline.scrollTop = timeline.scrollHeight;
   }
 
   function addEvent(direction, payload) {
@@ -183,28 +208,19 @@
     addMessage('system', `Connexion à ${wsUrl.value}...`);
     socket = new WebSocket(wsUrl.value.trim());
 
-    socket.onopen = () => {
-      setConnected(true);
-      addMessage('system', 'WebSocket connecté.');
-    };
-
-    socket.onclose = (event) => {
-      setConnected(false);
-      connectionId.textContent = '-';
-      addMessage('system', `WebSocket fermé (code ${event.code}).`);
-    };
-
-    socket.onerror = () => addMessage('system', 'Erreur WebSocket. Vérifie que le backend est lancé et que l’URL est correcte.');
+    socket.onopen = () => { setConnected(true); addMessage('system', 'WebSocket connecté.'); };
+    socket.onclose = (event) => { setConnected(false); connectionId.textContent = '-'; addMessage('system', `WebSocket fermé (code ${event.code}).`); };
+    socket.onerror = () => addMessage('system', 'Erreur WebSocket. Vérifie le backend et l’URL.');
 
     socket.onmessage = (event) => {
       let payload;
       try { payload = JSON.parse(event.data); }
       catch { payload = { type: 'raw', data: event.data }; }
+
+      addFlow(payload);
       addEvent('←', payload);
 
-      if (payload.type === 'connection.ready') {
-        connectionId.textContent = payload.data?.connection_id || '-';
-      }
+      if (payload.type === 'connection.ready') connectionId.textContent = payload.data?.connection_id || '-';
       if (payload.chat_id) $('chatId').value = payload.chat_id;
 
       if (payload.type === 'assistant.started') {
@@ -212,8 +228,8 @@
       } else if (payload.type === 'assistant.completed') {
         const answer = payload.data?.answer ?? payload.data?.response ?? payload.data?.text ?? JSON.stringify(payload.data, null, 2);
         addMessage('assistant', String(answer));
-        const suggestions = payload.data?.suggestions || payload.data?.actions;
-        if (suggestions?.length) addMessage('system', `Suggestions/actions:\n${JSON.stringify(suggestions, null, 2)}`);
+        const actions = payload.data?.actions;
+        if (actions?.length) addMessage('system', `Actions proposées:\n${JSON.stringify(actions, null, 2)}`);
       } else if (payload.type === 'agent.result') {
         addMessage('system', `Agent ${payload.data?.agent}: ${payload.data?.ok ? 'OK' : 'ERREUR'}\n${JSON.stringify(payload.data, null, 2)}`);
       } else if (payload.type === 'rules.reloaded') {
@@ -236,14 +252,11 @@
     $('message').value = '';
   };
   $('message').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      $('sendBtn').click();
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('sendBtn').click(); }
   });
   $('pingBtn').onclick = () => send(envelope('ping'));
   $('reloadRulesBtn').onclick = () => send(envelope('rules.reload'));
-  $('clearBtn').onclick = () => { messages.innerHTML = ''; events.innerHTML = ''; };
+  $('clearBtn').onclick = () => { messages.innerHTML = ''; events.innerHTML = ''; timeline.innerHTML = ''; };
 
   function emailPayload(confirmed) {
     return envelope('agent.execute', {
