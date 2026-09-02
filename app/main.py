@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from app.agents.email_agent import SendEmailAgent
@@ -125,3 +125,27 @@ async def skb_modules(refresh: bool = False) -> dict:
         "count": len(modules),
         "modules": modules,
     }
+
+
+@app.get("/skb/search")
+async def skb_search(
+    q: str = Query(min_length=1),
+    module: str | None = None,
+    limit: int = Query(default=5, ge=1, le=10),
+) -> dict:
+    result = await skb_search_agent.execute(
+        {
+            "query": q,
+            "module": module,
+            "limit": limit,
+        }
+    )
+    if not result.ok:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": result.error or "skb_search_failed",
+                "base_url": skb_client.base_url,
+            },
+        )
+    return result.data
