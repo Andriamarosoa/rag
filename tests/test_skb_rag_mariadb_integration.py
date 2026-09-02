@@ -168,8 +168,26 @@ async def test_native_vector_schema_upsert_search_and_cleanup():
             minimum_retention_ratio=0.4,
         )
         assert confirmed.activated
+        assert confirmed.previous_generation_id == second_generation
         assert confirmed.missing_pages == 1
         assert (await store.stats()).pages == 1
+
+        # The active chunk is an exact clone of one that remains in the
+        # superseded generation.  MariaDB's global ANN index can select the
+        # superseded duplicate before applying the generation filter, leaving
+        # no active result.  Search must rank only rows from the active
+        # generation.
+        cloned_matches = await store.search(
+            [0.0, 1.0, 0.0],
+            module="spay",
+            limit=1,
+            max_distance=0.01,
+            expected_index_signature=second_signature,
+        )
+        assert len(cloned_matches) == 1
+        assert cloned_matches[0].page_id == updated_page.page_id
+        assert cloned_matches[0].source_url == updated_page.source_url
+        assert cloned_matches[0].distance == pytest.approx(0.0)
 
         async with store.index_sync_lock():
             with pytest.raises(IndexSyncLockedError):

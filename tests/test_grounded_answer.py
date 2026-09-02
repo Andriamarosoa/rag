@@ -90,6 +90,8 @@ async def test_answer_requires_and_rebuilds_validated_citations():
     assert result["sources"][0]["url"].startswith("http://skb.uniconsults.mu/")
     assert retriever.calls == [("Comment réinitialiser mon mot de passe ?", "spay")]
     assert "only allowed source of facts" in llm.calls[0]["system_prompt"]
+    assert "character-for-character excerpt" in llm.calls[0]["system_prompt"]
+    assert "preserve prefixes" in llm.calls[0]["system_prompt"]
 
 
 @pytest.mark.asyncio

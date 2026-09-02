@@ -260,10 +260,15 @@ STRICT SOURCE CONTRACT:
 - When chunks conflict, prefer the source whose title/content is most specific to the
   question and whose cosine_distance is lower. If the conflict cannot be resolved from
   the chunks, return insufficient_information instead of combining incompatible paths.
+- When a dedicated procedure page directly answers the question, do not append a
+  different answer from a navigation page or a less-specific FAQ.
 - Split the answer into short, atomic claims. Every claim must have at least one
   evidence item copied from SOURCE_CHUNKS.
-- Each evidence quote must be an exact, verbatim excerpt from the cited chunk and must
-  directly support the claim. Never paraphrase inside the quote.
+- Each evidence quote must be one continuous, exact, character-for-character excerpt
+  from the cited chunk and must directly support the claim. Prefer one complete source
+  line and preserve prefixes such as "- 3a:". Never remove list markers, join separate
+  lines, add punctuation, or paraphrase inside a quote. If a claim needs several source
+  lines, emit a separate evidence item for each exact line.
 - citation_id values may only come from SOURCE_CHUNKS.
 - If the chunks do not contain enough evidence, return status
   insufficient_information and an empty claims array.

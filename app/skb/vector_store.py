@@ -887,6 +887,11 @@ class MariaDBVectorStore:
                     parameters.append(canonical_module)
                 parameters.append(limit)
                 where = " AND ".join(where_parts)
+                # The HNSW index spans both active and superseded generations.
+                # MariaDB can choose global ANN candidates before applying the
+                # generation/module predicates, which may leave zero active rows
+                # when an identical superseded vector exists. An exact scan over
+                # the already-filtered active generation is reliable at SKB scale.
                 sql = f"""
                     SELECT c.chunk_id, c.page_id, c.title, c.source_url,
                            c.module, c.section, c.section_path, c.content,
@@ -894,6 +899,7 @@ class MariaDBVectorStore:
                                c.embedding, VEC_FromText(%s)
                            ) AS distance
                     FROM skb_chunks_v2 AS c
+                    IGNORE INDEX (skb_chunks_v2_embedding_idx)
                     WHERE {where}
                     ORDER BY distance ASC
                     LIMIT %s

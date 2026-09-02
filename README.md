@@ -29,7 +29,7 @@ Chat:
 ```text
 Browser -> WebSocket chat.message {text, module}
     -> embed the question with bge-m3
-    -> MariaDB cosine retrieval
+    -> exact MariaDB cosine retrieval within the active generation
        (optional module filter, top-k and distance threshold)
     -> Qwen receives only the retrieved SKB chunks
     -> structured atomic claims with citation IDs and exact evidence quotes
@@ -60,7 +60,8 @@ Important guarantees:
 - SQLite chat/session persistence;
 - DokuWiki discovery and `export_raw` ingestion;
 - Ollama `bge-m3` multilingual embeddings (1024 dimensions);
-- MariaDB 11.8 LTS native `VECTOR` storage and cosine search;
+- MariaDB 11.8 LTS native `VECTOR` storage and exact cosine search over the
+  active generation;
 - Ollama/Qwen grounded answer generation with `think=false`;
 - a static HTML/JavaScript test UI;
 - the existing JSON rule engine and code-agent registry.

@@ -26,10 +26,12 @@ mariadb
    `- host port 3307, persistent ./mariadb_data
 ~~~
 
-The strict chat.message route embeds the question, performs module-filtered
-MariaDB cosine retrieval, asks Qwen to generate from retrieved SKB chunks only,
-validates citation IDs and SKB URLs, and returns an answer with sources or an
-abstention.
+The strict chat.message route embeds the question, performs an exact
+module-filtered MariaDB cosine search within the active generation, asks Qwen
+to generate from retrieved SKB chunks only, validates citation IDs and SKB
+URLs, and returns an answer with sources or an abstention. The query
+deliberately bypasses the table-wide approximate vector index because active
+and superseded generations can contain identical vectors.
 
 JSON rules, Codex compatibility code, and code agents remain in the container
 for explicit control operations. They are not part of chat answer generation.
