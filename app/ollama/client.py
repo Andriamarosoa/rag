@@ -45,15 +45,22 @@ class OllamaNativeResult:
 class OllamaNativeClient:
     """Direct Ollama API client used when exact model controls are required.
 
-    Codex currently talks to Ollama through the OpenAI-compatible Responses API. The native
-    `/api/chat` endpoint is used for the integrated assistant decision because it exposes the
-    real `think=false` control and native timing/token metrics.
+    Codex talks to Ollama through the OpenAI-compatible API whose base URL usually ends in
+    `/v1`. The native `/api/chat` API does not use that prefix, so this client deliberately
+    normalizes an accidentally reused `/v1` URL before building native requests.
     """
 
     def __init__(self, base_url: str, model: str, timeout_seconds: float = 180.0):
-        self.base_url = base_url.rstrip("/")
+        self.base_url = self.normalize_base_url(base_url)
         self.model = model
         self._client = httpx.AsyncClient(base_url=self.base_url, timeout=timeout_seconds)
+
+    @staticmethod
+    def normalize_base_url(base_url: str) -> str:
+        normalized = base_url.strip().rstrip("/")
+        if normalized.lower().endswith("/v1"):
+            normalized = normalized[:-3].rstrip("/")
+        return normalized
 
     async def close(self) -> None:
         await self._client.aclose()
