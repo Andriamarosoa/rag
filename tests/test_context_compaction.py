@@ -8,7 +8,7 @@ from app.sessions.store import SessionStore
 
 
 class FakeSummarizer:
-    async def summarize_context(self, previous_summary, messages):
+    async def summarize_context(self, previous_summary, messages, emit=None):
         return f"summary:{previous_summary}|" + ";".join(m.content for m in messages)
 
 
@@ -27,6 +27,15 @@ async def test_context_compacts_old_messages(tmp_path: Path):
         keep_recent_tokens=45,
         summary_target_tokens=200,
     )
-    snapshot = await manager.compact_if_needed(chat.id, "u1")
+    events = []
+
+    async def emit(event_type, data):
+        events.append((event_type, data))
+
+    snapshot = await manager.compact_if_needed(chat.id, "u1", emit=emit)
     assert snapshot.chat.summary.startswith("summary:")
     assert 1 <= len(snapshot.messages) < 8
+    event_types = [event_type for event_type, _ in events]
+    assert "context.snapshot" in event_types
+    assert "context.compaction.started" in event_types
+    assert "context.compaction.completed" in event_types
