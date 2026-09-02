@@ -10,9 +10,11 @@ class FakeClient:
         self.model = "qwen3:8b"
         self.response = response
         self.calls = 0
+        self.last_prompt = ""
 
     async def ask(self, prompt: str, thread_id: str | None = None) -> CodexResult:
         self.calls += 1
+        self.last_prompt = prompt
         return CodexResult(
             text=json.dumps(self.response),
             thread_id=thread_id or "thread-1",
@@ -60,6 +62,7 @@ def test_rules_and_reasoning_share_one_model_call():
     )
 
     assert client.calls == 1
+    assert client.last_prompt.rstrip().endswith("/no_think")
     assert result["matched_rule"] == "math_calculation"
     assert result["rule_confidence"] == 0.99
     assert result["answer"] == "hahahaha"
@@ -70,9 +73,11 @@ def test_rules_and_reasoning_share_one_model_call():
 
     assert started["operation"] == "assistant_decision"
     assert started["model"] == "qwen3:8b"
+    assert started["thinking_mode"] == "no_think"
     assert started["prompt_tokens_estimated"] > 0
     assert started["timing_scope"] == "codex_to_ollama_round_trip"
 
+    assert completed["thinking_mode"] == "no_think"
     assert completed["elapsed_ms"] >= 0
     assert completed["prompt_tokens_estimated"] == started["prompt_tokens_estimated"]
     assert completed["output_tokens_estimated"] > 0
