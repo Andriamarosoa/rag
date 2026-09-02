@@ -86,6 +86,7 @@ def test_followup_classifier_never_receives_previous_reset_context():
             {
                 "status": "insufficient_information",
                 "answer": "I cannot determine the administrator's availability.",
+                "unresolved_requests": ["When is the administrator available?"],
                 "suggested_agent": None,
                 "suggested_agent_args": {},
             },
@@ -107,6 +108,8 @@ def test_followup_classifier_never_receives_previous_reset_context():
     assert result["matched_rules"] == []
     assert result["matched_rule"] is None
     assert result["answer"] == "I cannot determine the administrator's availability."
+    assert result["unresolved_requests"] == ["When is the administrator available?"]
+    assert result["has_unanswered_requests"] is True
     assert result["decision_pipeline"] == "isolated_classifier_then_answer"
     assert len(decision.calls) == 2
 
@@ -121,9 +124,10 @@ def test_followup_classifier_never_receives_previous_reset_context():
     assert "I want to reset password" in answer_call["user_prompt"]
     assert "matched_rules" in classifier_call["schema"]["properties"]
     assert "matched_rules" not in answer_call["schema"]["properties"]
+    assert "unresolved_requests" in answer_call["schema"]["properties"]
 
 
-def test_mixed_message_keeps_rule_match_and_answers_uncovered_question():
+def test_mixed_message_keeps_rule_match_and_marks_unanswered_clause():
     decision = SequenceDecisionClient(
         [
             {
@@ -138,6 +142,7 @@ def test_mixed_message_keeps_rule_match_and_answers_uncovered_question():
                     "The user must contact their administrator to reset the password. "
                     "I cannot determine when the administrator is available."
                 ),
+                "unresolved_requests": ["When is the administrator available?"],
                 "suggested_agent": None,
                 "suggested_agent_args": {},
             },
@@ -160,6 +165,44 @@ def test_mixed_message_keeps_rule_match_and_answers_uncovered_question():
         {"rule_id": "password_reset", "confidence": 0.98}
     ]
     assert result["has_uncovered_request"] is True
+    assert result["status"] == "answered"
+    assert result["unresolved_requests"] == ["When is the administrator available?"]
+    assert result["has_unanswered_requests"] is True
     assert "administrator to reset" in result["answer"]
     assert "available" in result["answer"]
     assert len(decision.calls) == 2
+
+
+def test_fully_answered_message_has_no_unanswered_requests():
+    decision = SequenceDecisionClient(
+        [
+            {
+                "matched_rules": [
+                    {"rule_id": "password_reset", "confidence": 0.98},
+                ],
+                "has_uncovered_request": False,
+            },
+            {
+                "status": "answered",
+                "answer": "Contact the administrator to reset the password.",
+                "unresolved_requests": [],
+                "suggested_agent": None,
+                "suggested_agent_args": {},
+            },
+        ]
+    )
+    service = IsolatedDecisionService(FakeCodexClient(), decision_client=decision)
+
+    result = asyncio.run(
+        service.answer_with_rules(
+            user_message="I want to reset password.",
+            rendered_context="",
+            rules=[password_rule()],
+            agents=[],
+            thread_id=None,
+            emit=None,
+        )
+    )
+
+    assert result["unresolved_requests"] == []
+    assert result["has_unanswered_requests"] is False
