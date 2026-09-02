@@ -1,20 +1,68 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from app.rules.engine import RuleEngine
-from app.rules.models import FunctionalRule, RuleFile
+from app.rules.models import FunctionalRule
 
 
-def test_rule_file_is_valid_and_uses_action_arrays():
-    payload = json.loads(Path("config/rules.json").read_text(encoding="utf-8"))
-    rules = RuleFile.model_validate(payload)
+def test_rule_directory_is_valid_and_filename_is_rule_id():
+    rules = RuleEngine(Path("config/rules")).reload()
 
     assert rules.version == 1
-    assert any(rule.id == "math_calculation" for rule in rules.rules)
-    assert any(rule.id == "password_reset" for rule in rules.rules)
-    assert any(rule.id == "no_answer_suggest_email" for rule in rules.rules)
+    assert {rule.id for rule in rules.rules} == {
+        "math_calculation",
+        "password_reset",
+        "no_answer_suggest_email",
+    }
     assert all(isinstance(rule.then, list) for rule in rules.rules)
     assert all(rule.then for rule in rules.rules)
+
+    for path in Path("config/rules").glob("*.json"):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert "id" not in payload
+        assert any(rule.id == path.stem for rule in rules.rules)
+
+
+def test_loader_injects_id_from_filename(tmp_path: Path):
+    rules_dir = tmp_path / "rules"
+    rules_dir.mkdir()
+    (rules_dir / "my_rule.json").write_text(
+        json.dumps(
+            {
+                "phase": "pre",
+                "when": {"type": "semantic"},
+                "then": {"type": "respond", "canonical_answer": "ok"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rules = RuleEngine(rules_dir).reload()
+
+    assert len(rules.rules) == 1
+    assert rules.rules[0].id == "my_rule"
+    assert rules.rules[0].then == [{"type": "respond", "canonical_answer": "ok"}]
+
+
+def test_loader_rejects_explicit_id_in_rule_file(tmp_path: Path):
+    rules_dir = tmp_path / "rules"
+    rules_dir.mkdir()
+    (rules_dir / "filename_id.json").write_text(
+        json.dumps(
+            {
+                "id": "other_id",
+                "phase": "pre",
+                "when": {"type": "semantic"},
+                "then": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="rule_id_must_come_from_filename"):
+        RuleEngine(rules_dir).reload()
 
 
 def test_legacy_single_then_action_is_normalized_to_array():
