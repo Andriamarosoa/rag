@@ -90,7 +90,29 @@ class Orchestrator:
             emit=emit,
         )
 
+        proposed_rule_id = result.get("matched_rule")
         pre_rule = await self.rules.resolve_pre_decision(result, emit=emit)
+
+        # If the model generated an answer while assuming a rule that the local rule engine
+        # rejects (for example because confidence is below threshold), that answer must not
+        # leak through as if the rule had been accepted.
+        if proposed_rule_id and pre_rule is None:
+            result.update(
+                {
+                    "matched_rule": None,
+                    "status": "insufficient_information",
+                    "answer": None,
+                    "suggested_agent": None,
+                    "suggested_agent_args": {},
+                    "actions": [],
+                }
+            )
+            await emit_flow(
+                emit,
+                "reasoning.rule_answer.discarded",
+                proposed_rule_id=proposed_rule_id,
+                reason="rule_not_accepted",
+            )
 
         if result.get("thread_id") and result.get("thread_id") != chat.codex_thread_id:
             await self.store.set_codex_thread(chat.id, result["thread_id"])
