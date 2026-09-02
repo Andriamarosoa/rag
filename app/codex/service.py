@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from time import perf_counter
 from typing import Any
 
 from app.context.manager import Summarizer
@@ -15,6 +16,11 @@ class CodexService(Summarizer):
     def __init__(self, client: CodexMcpClient):
         self.client = client
 
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """Cheap model-agnostic estimate used only for UI/performance diagnostics."""
+        return max(1, len(text) // 4) if text else 0
+
     async def complete(
         self,
         prompt: str,
@@ -23,6 +29,7 @@ class CodexService(Summarizer):
         operation: str = "complete",
         emit: FlowEmitter | None = None,
     ) -> CodexResult:
+        prompt_tokens_estimated = self._estimate_tokens(prompt)
         await emit_flow(
             emit,
             "model.request.started",
@@ -31,19 +38,31 @@ class CodexService(Summarizer):
             model=self.client.model or None,
             thread_reused=bool(thread_id),
             prompt_chars=len(prompt),
+            prompt_tokens_estimated=prompt_tokens_estimated,
+            estimated_tokens=prompt_tokens_estimated,
+            timing_scope="codex_to_ollama_round_trip",
         )
+
+        started_at = perf_counter()
         try:
             result = await self.client.ask(prompt, thread_id=thread_id)
         except Exception as exc:
+            elapsed_ms = round((perf_counter() - started_at) * 1000, 1)
             await emit_flow(
                 emit,
                 "model.request.failed",
                 provider="codex_ollama",
                 operation=operation,
                 model=self.client.model or None,
+                elapsed_ms=elapsed_ms,
+                elapsed_seconds=round(elapsed_ms / 1000, 3),
+                timing_scope="codex_to_ollama_round_trip",
                 error=type(exc).__name__,
             )
             raise
+
+        elapsed_ms = round((perf_counter() - started_at) * 1000, 1)
+        output_tokens_estimated = self._estimate_tokens(result.text)
         await emit_flow(
             emit,
             "model.request.completed",
@@ -51,7 +70,23 @@ class CodexService(Summarizer):
             operation=operation,
             model=self.client.model or None,
             thread_id=result.thread_id,
+            prompt_chars=len(prompt),
             output_chars=len(result.text),
+            prompt_tokens_estimated=prompt_tokens_estimated,
+            output_tokens_estimated=output_tokens_estimated,
+            elapsed_ms=elapsed_ms,
+            elapsed_seconds=round(elapsed_ms / 1000, 3),
+            timing_scope="codex_to_ollama_round_trip",
+            metrics_source="application_wall_clock",
+            native_ollama_eval_metrics_available=False,
+            # Existing UI already renders `status` and `estimated_tokens`. Keep a concise
+            # human-readable diagnostic there while the structured fields remain available
+            # to Developer/raw-event consumers.
+            status=(
+                f"{self.client.model or 'model'} · {elapsed_ms / 1000:.1f} s · "
+                f"prompt≈{prompt_tokens_estimated} tok · output≈{output_tokens_estimated} tok"
+            ),
+            estimated_tokens=prompt_tokens_estimated,
         )
         return result
 
