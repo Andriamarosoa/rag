@@ -2,12 +2,12 @@
   "enabled": true,
   "phase": "post",
   "priority": 100,
-  "description": "When no reliable answer can be produced, suggest contacting a human by email.",
+  "description": "When one or more user requests cannot be answered reliably, suggest contacting a human by email even if other requests in the same message were answered.",
   "when": {
     "type": "result_state",
-    "field": "status",
-    "operator": "in",
-    "value": ["not_found", "insufficient_information"]
+    "field": "has_unanswered_requests",
+    "operator": "eq",
+    "value": true
   },
   "then": [
     {
