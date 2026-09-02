@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     app_host: str = "0.0.0.0"
     app_port: int = 8765
     database_path: Path = Path("data/rag.db")
-    rules_path: Path = Path("config/rules.json")
+    rules_path: Path = Path("config/rules")
 
     context_compact_at_tokens: int = 50_000
     context_keep_recent_tokens: int = 12_000
