@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from time import perf_counter
 from typing import Any
 
 from app.agents.registry import AgentRegistry
@@ -64,11 +65,13 @@ class Orchestrator:
         )
 
         semantic_rules = self.rules.semantic_pre_rules()
+        rule_decision_started_at = perf_counter()
         await emit_flow(
             emit,
             "rules.pre.started",
             candidate_count=len(semantic_rules),
             integrated_with_reasoning=True,
+            timing_scope="integrated_assistant_decision",
         )
 
         refreshed_chat = await self.store.get_chat(chat.id, user_id)
@@ -90,8 +93,13 @@ class Orchestrator:
             emit=emit,
         )
 
+        rule_decision_elapsed_ms = round((perf_counter() - rule_decision_started_at) * 1000, 1)
         proposed_rule_id = result.get("matched_rule")
-        pre_rule = await self.rules.resolve_pre_decision(result, emit=emit)
+        pre_rule = await self.rules.resolve_pre_decision(
+            result,
+            emit=emit,
+            decision_elapsed_ms=rule_decision_elapsed_ms,
+        )
 
         # If the model generated an answer while assuming a rule that the local rule engine
         # rejects (for example because confidence is below threshold), that answer must not
