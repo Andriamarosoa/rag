@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -9,8 +10,15 @@ from app.flow.events import FlowEmitter, emit_flow
 from .models import FunctionalRule, RuleFile
 
 
+_RULE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
 class RuleEngine:
     """Loads business rules and enforces model decisions locally.
+
+    Each `*.json` file under `rules_path` defines one rule. The filename stem is the rule id,
+    so `config/rules/password_reset.json` becomes rule id `password_reset`. Rule JSON files
+    must not contain an `id` field.
 
     Semantic classification is intentionally performed by the same model pass that
     produces the assistant answer. This engine never calls a model by itself.
@@ -21,8 +29,34 @@ class RuleEngine:
         self._rules: RuleFile | None = None
 
     def reload(self) -> RuleFile:
-        payload = json.loads(self.rules_path.read_text(encoding="utf-8"))
-        self._rules = RuleFile.model_validate(payload)
+        if not self.rules_path.exists():
+            raise FileNotFoundError(f"rules_path_not_found:{self.rules_path}")
+        if not self.rules_path.is_dir():
+            raise ValueError(f"rules_path_must_be_directory:{self.rules_path}")
+
+        files = sorted(self.rules_path.glob("*.json"), key=lambda path: path.name.casefold())
+        rules: list[FunctionalRule] = []
+        seen_ids: set[str] = set()
+
+        for path in files:
+            rule_id = path.stem
+            if not rule_id or not _RULE_ID_RE.fullmatch(rule_id):
+                raise ValueError(f"invalid_rule_filename:{path.name}")
+
+            normalized_id = rule_id.casefold()
+            if normalized_id in seen_ids:
+                raise ValueError(f"duplicate_rule_id:{rule_id}")
+            seen_ids.add(normalized_id)
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError(f"rule_file_must_be_object:{path.name}")
+            if "id" in payload:
+                raise ValueError(f"rule_id_must_come_from_filename:{path.name}")
+
+            rules.append(FunctionalRule.model_validate({"id": rule_id, **payload}))
+
+        self._rules = RuleFile(version=1, rules=rules)
         return self._rules
 
     @property
