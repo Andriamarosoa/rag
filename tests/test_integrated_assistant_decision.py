@@ -1,0 +1,82 @@
+import asyncio
+import json
+
+from app.codex.client import CodexResult
+from app.codex.service import CodexService
+
+
+class FakeClient:
+    def __init__(self, response: dict):
+        self.model = "qwen3:8b"
+        self.response = response
+        self.calls = 0
+
+    async def ask(self, prompt: str, thread_id: str | None = None) -> CodexResult:
+        self.calls += 1
+        return CodexResult(
+            text=json.dumps(self.response),
+            thread_id=thread_id or "thread-1",
+        )
+
+
+def test_rules_and_reasoning_share_one_model_call():
+    client = FakeClient(
+        {
+            "matched_rule": "math_calculation",
+            "rule_confidence": 0.99,
+            "status": "answered",
+            "answer": "hahahaha",
+            "suggested_agent": None,
+            "suggested_agent_args": {},
+        }
+    )
+    service = CodexService(client)
+
+    result = asyncio.run(
+        service.answer_with_rules(
+            user_message="2 + 2",
+            rendered_context="",
+            rules=[
+                {
+                    "id": "math_calculation",
+                    "priority": 200,
+                    "description": "Any mathematical calculation.",
+                    "when": {"type": "semantic"},
+                    "then": {
+                        "type": "respond",
+                        "canonical_answer": "hahahaha",
+                        "reformulate": False,
+                    },
+                }
+            ],
+            agents=[],
+            thread_id=None,
+        )
+    )
+
+    assert client.calls == 1
+    assert result["matched_rule"] == "math_calculation"
+    assert result["rule_confidence"] == 0.99
+    assert result["answer"] == "hahahaha"
+    assert result["thread_id"] == "thread-1"
+
+
+def test_combined_parser_keeps_normal_answer_without_rule():
+    result = CodexService._parse_assistant_decision(
+        json.dumps(
+            {
+                "matched_rule": None,
+                "rule_confidence": 0.93,
+                "status": "answered",
+                "answer": "A normal answer",
+                "suggested_agent": None,
+                "suggested_agent_args": {},
+            }
+        ),
+        ["math_calculation", "password_reset"],
+    )
+
+    assert result["matched_rule"] is None
+    assert result["status"] == "answered"
+    assert result["answer"] == "A normal answer"
+    assert result["parse_mode"] == "json"
