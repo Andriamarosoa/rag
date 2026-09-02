@@ -1,6 +1,6 @@
 services:
   mariadb:
-    image: mariadb:11.7
+    image: mariadb:11.8
     container_name: mariadb
     # restart: unless-stopped
     environment:
@@ -11,7 +11,7 @@ services:
       MARIADB_AUTO_UPGRADE: '1'
     command: --max-allowed-packet=256M
     ports:
-      - "3307:3306"
+      - "127.0.0.1:3307:3306"
     volumes:
       - ./mariadb_data:/var/lib/mysql
     healthcheck:
@@ -53,15 +53,39 @@ services:
       # SKB knowledge base. Modules are discovered at startup and injected through
       # search_skb's input schema into the assistant_decision prompt.
       SKB_BASE_URL: ${SKB_BASE_URL:-http://skb.uniconsults.mu/}
-      SKB_REQUEST_TIMEOUT_SECONDS: ${SKB_REQUEST_TIMEOUT_SECONDS:-5}
+      SKB_REQUEST_TIMEOUT_SECONDS: ${SKB_REQUEST_TIMEOUT_SECONDS:-15}
       SKB_MODULE_CACHE_SECONDS: ${SKB_MODULE_CACHE_SECONDS:-600}
       SKB_SEARCH_MAX_PAGES: ${SKB_SEARCH_MAX_PAGES:-30}
+
+      # Persistent DokuWiki RAG index.
+      SKB_EMBEDDING_BASE_URL: ${SKB_EMBEDDING_BASE_URL:-http://100.89.128.87:11434}
+      SKB_EMBEDDING_MODEL: ${SKB_EMBEDDING_MODEL:-bge-m3}
+      SKB_EMBEDDING_DIMENSION: ${SKB_EMBEDDING_DIMENSION:-1024}
+      SKB_EMBEDDING_BATCH_SIZE: ${SKB_EMBEDDING_BATCH_SIZE:-16}
+      SKB_EMBEDDING_TIMEOUT_SECONDS: ${SKB_EMBEDDING_TIMEOUT_SECONDS:-180}
+      SKB_CRAWL_CONCURRENCY: ${SKB_CRAWL_CONCURRENCY:-3}
+      SKB_CHUNK_SIZE: ${SKB_CHUNK_SIZE:-1600}
+      SKB_CHUNK_OVERLAP: ${SKB_CHUNK_OVERLAP:-200}
+      SKB_MIN_CHUNK_SIZE: ${SKB_MIN_CHUNK_SIZE:-80}
+      SKB_RETRIEVAL_TOP_K: ${SKB_RETRIEVAL_TOP_K:-6}
+      SKB_RETRIEVAL_MAX_DISTANCE: ${SKB_RETRIEVAL_MAX_DISTANCE:-0.45}
+      SKB_ANSWER_MAX_CONTEXT_CHARACTERS: ${SKB_ANSWER_MAX_CONTEXT_CHARACTERS:-24000}
+      SKB_SYNC_ON_STARTUP: ${SKB_SYNC_ON_STARTUP:-true}
+
+      DB_HOST: mariadb
+      DB_PORT: 3306
+      DB_USER: ${DB_USER:-myuser}
+      DB_PASSWORD: ${DB_PASSWORD:-myuserpassword}
+      DB_NAME: ${DB_NAME:-sicorax}
+      DB_POOL_MIN_SIZE: ${DB_POOL_MIN_SIZE:-1}
+      DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-5}
+      DB_CONNECT_TIMEOUT_SECONDS: ${DB_CONNECT_TIMEOUT_SECONDS:-10}
 
       CONTEXT_COMPACT_AT_TOKENS: ${CONTEXT_COMPACT_AT_TOKENS:-50000}
       CONTEXT_KEEP_RECENT_TOKENS: ${CONTEXT_KEEP_RECENT_TOKENS:-12000}
       CONTEXT_SUMMARY_TARGET_TOKENS: ${CONTEXT_SUMMARY_TARGET_TOKENS:-8000}
     ports:
-      - "${APP_PORT:-8765}:${APP_PORT:-8765}"
+      - "127.0.0.1:${APP_PORT:-8765}:${APP_PORT:-8765}"
     volumes:
       # Source is visible to Codex but not writable from the container.
       - .:/app:ro

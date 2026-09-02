@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from json import JSONDecodeError
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
 from app.agents.registry import AgentRegistry
 from app.orchestrator import Orchestrator
 from app.rules.engine import RuleEngine
+from app.skb.models import SKB_MODULES
 
 from .manager import ConnectionManager
 from .protocol import ClientEnvelope, ServerEnvelope
@@ -32,7 +35,17 @@ def build_router(
             )
 
             while True:
-                raw = await websocket.receive_json()
+                try:
+                    raw = await websocket.receive_json()
+                except JSONDecodeError:
+                    await manager.send(
+                        session,
+                        ServerEnvelope(
+                            type="error",
+                            data={"code": "invalid_json", "message": "Malformed JSON payload."},
+                        ).model_dump(),
+                    )
+                    continue
                 try:
                     event = ClientEnvelope.model_validate(raw)
                 except ValidationError as exc:
@@ -111,6 +124,25 @@ def build_router(
                             "agent.execution.failed",
                             {"agent": name, "error": type(exc).__name__, "message": str(exc)},
                         )
+                        await manager.send(
+                            session,
+                            ServerEnvelope(
+                                type="agent.result",
+                                request_id=event.request_id,
+                                user_id=event.user_id,
+                                chat_id=session.chat_id,
+                                data={
+                                    "agent": name,
+                                    "ok": False,
+                                    "data": {},
+                                    "error": str(exc),
+                                },
+                            ).model_dump(),
+                        )
+                        await send_flow_event(
+                            "flow.completed",
+                            {"status": "failed", "agent": name, "action_count": 1},
+                        )
                         continue
                     await send_flow_event(
                         "agent.execution.completed",
@@ -131,6 +163,14 @@ def build_router(
                             data={"agent": name, "ok": result.ok, "data": result.data, "error": result.error},
                         ).model_dump(),
                     )
+                    await send_flow_event(
+                        "flow.completed",
+                        {
+                            "status": "completed" if result.ok else "failed",
+                            "agent": name,
+                            "action_count": 1,
+                        },
+                    )
                     continue
 
                 if event.type == "chat.message":
@@ -139,6 +179,42 @@ def build_router(
                         await manager.send(
                             session,
                             ServerEnvelope(type="error", request_id=event.request_id, data={"code": "empty_message"}).model_dump(),
+                        )
+                        continue
+                    if len(text) > 20_000:
+                        await manager.send(
+                            session,
+                            ServerEnvelope(
+                                type="error",
+                                request_id=event.request_id,
+                                user_id=event.user_id,
+                                chat_id=session.chat_id,
+                                data={
+                                    "code": "message_too_large",
+                                    "message": "Message exceeds the 20000 character limit.",
+                                },
+                            ).model_dump(),
+                        )
+                        continue
+
+                    raw_module = event.data.get("module")
+                    module = str(raw_module).strip().casefold() if raw_module is not None else None
+                    module = module or None
+                    allowed_modules = {item.namespace for item in SKB_MODULES}
+                    if module is not None and module not in allowed_modules:
+                        await manager.send(
+                            session,
+                            ServerEnvelope(
+                                type="error",
+                                request_id=event.request_id,
+                                user_id=event.user_id,
+                                chat_id=session.chat_id,
+                                data={
+                                    "code": "invalid_module",
+                                    "message": "Unknown SKB module.",
+                                    "allowed_modules": sorted(allowed_modules),
+                                },
+                            ).model_dump(),
                         )
                         continue
 
@@ -154,9 +230,10 @@ def build_router(
                     try:
                         result = await orchestrator.handle_message(
                             event.user_id,
-                            event.chat_id,
+                            event.chat_id or session.chat_id,
                             text,
                             emit=send_flow_event,
+                            module=module,
                         )
                     except Exception as exc:
                         await send_flow_event(

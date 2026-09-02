@@ -23,7 +23,7 @@
     * { box-sizing:border-box; }
     html,body { width:100%; height:100%; }
     body { margin:0; background:var(--bg); color:var(--text); overflow:hidden; }
-    button,input,textarea { font:inherit; }
+    button,input,select,textarea { font:inherit; }
     button { color:inherit; }
 
     .app {
@@ -96,11 +96,22 @@
     .message-row.user { justify-content:flex-end; }
     .message-row.assistant { justify-content:flex-start; }
     .message { max-width:min(90%,700px); line-height:1.6; font-size:15px; overflow-wrap:anywhere; }
-    .message.user { background:var(--bubble); padding:10px 16px; border-radius:18px; white-space:pre-wrap; }
+    .message.user { background:var(--bubble); padding:10px 16px; border-radius:18px; }
+    .user-message-context { margin-bottom:4px; color:#b8b8c0; font-size:11px; font-weight:650; letter-spacing:.01em; white-space:normal; }
+    .user-message-text { white-space:pre-wrap; }
     .message.assistant { width:min(100%,700px); padding:4px 0; }
     .assistant-head { display:flex; align-items:center; gap:9px; margin-bottom:9px; font-size:13px; font-weight:650; }
     .message-content { white-space:pre-wrap; margin-top:14px; }
     .message-content:empty { display:none; }
+    .message-sources { display:none; margin-top:14px; padding-top:11px; border-top:1px solid var(--border); }
+    .message-sources.visible { display:block; }
+    .message-sources-title { margin-bottom:7px; color:#a8a8b0; font-size:11px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; }
+    .message-sources-list { display:flex; flex-wrap:wrap; gap:7px; }
+    .message-source { display:flex; min-width:0; max-width:100%; flex-direction:column; gap:1px; border:1px solid var(--border); border-radius:9px; background:rgba(255,255,255,.035); color:#e4e4e7; padding:7px 10px; text-decoration:none; }
+    .message-source:hover { background:rgba(255,255,255,.075); }
+    .message-source:focus-visible { outline:2px solid #d4d4d8; outline-offset:2px; }
+    .message-source-title { overflow:hidden; font-size:12px; font-weight:650; text-overflow:ellipsis; white-space:nowrap; }
+    .message-source-meta { color:#999; font-size:10px; }
     .message-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
     .action-button { border:1px solid var(--border); background:#fff; color:#111; border-radius:9px; padding:8px 12px; cursor:pointer; font-size:13px; font-weight:650; }
     .action-button:hover { background:#e8e8e8; }
@@ -148,6 +159,11 @@
     }
 
     .composer textarea { display:block; width:100%; min-height:38px; max-height:180px; resize:none; border:0; outline:0; background:transparent; color:var(--text); padding:6px 4px; line-height:1.5; }
+    .composer-context { display:flex; align-items:center; gap:8px; min-width:0; padding:0 4px 5px; }
+    .composer-context label { flex:0 0 auto; color:#b8b8c0; font-size:11px; font-weight:650; }
+    .module-select { min-width:0; max-width:260px; border:1px solid var(--border); border-radius:8px; background:#262626; color:var(--text); padding:5px 28px 5px 8px; font-size:12px; cursor:pointer; }
+    .module-select:hover { background:#2b2b2b; }
+    .module-select:focus-visible { outline:2px solid #d4d4d8; outline-offset:2px; }
     .composer-bottom { display:flex; justify-content:space-between; align-items:center; gap:8px; }
     .composer-note { font-size:11px; color:#777; padding-left:4px; }
     .send-button { width:34px; height:34px; border:0; border-radius:50%; cursor:pointer; background:#fff; color:#111; display:grid; place-items:center; font-size:17px; font-weight:900; }
@@ -221,6 +237,11 @@
       .topbar { padding:0 10px; }
       .composer-wrap { padding-left:10px; padding-right:10px; }
     }
+
+    @media(max-width:520px) {
+      .composer-context { align-items:stretch; flex-direction:column; gap:5px; }
+      .module-select { width:100%; max-width:none; }
+    }
   </style>
 </head>
 <body>
@@ -257,6 +278,22 @@
 
     <div id="composerWrap" class="composer-wrap">
       <div class="composer">
+        <div class="composer-context">
+          <label for="moduleSelect">Module SKB</label>
+          <select id="moduleSelect" class="module-select" title="Limiter la recherche à un module SKB">
+            <option value="" selected>Tous les modules</option>
+            <option value="spay">Payroll</option>
+            <option value="shrm">Human Resources</option>
+            <option value="sgc">Gestion Commerciale</option>
+            <option value="sacc">Accounting</option>
+            <option value="sfar">Fixed Asset</option>
+            <option value="sef">Equipment Follow-up</option>
+            <option value="sim">Incident Management</option>
+            <option value="seam">SEAM</option>
+            <option value="pms">PMS</option>
+            <option value="sess">SESS</option>
+          </select>
+        </div>
         <textarea id="messageInput" rows="1" placeholder="Envoyer un message"></textarea>
         <div class="composer-bottom">
           <div class="composer-note">Entrée pour envoyer · Maj+Entrée pour une nouvelle ligne</div>
@@ -307,6 +344,7 @@
   const conversationShell = $('conversationShell');
   const emptyState = $('emptyState');
   const input = $('messageInput');
+  const moduleSelect = $('moduleSelect');
   const sendBtn = $('sendBtn');
   const timeline = $('timeline');
   const events = $('events');
@@ -400,13 +438,28 @@
     $('sidebarChat').textContent=$('chatId').value.trim()||'nouvelle conversation';
   }
 
-  function addUserMessage(text){
+  function selectedModuleScope(){
+    const namespace=moduleSelect.value.trim();
+    const selectedOption=moduleSelect.options[moduleSelect.selectedIndex];
+    return {
+      namespace:namespace||null,
+      label:selectedOption?.textContent?.trim()||'Tous les modules'
+    };
+  }
+
+  function addUserMessage(text,moduleLabel){
     hideEmpty();
     const row=document.createElement('div');
     row.className='message-row user';
     const msg=document.createElement('div');
     msg.className='message user';
-    msg.textContent=text;
+    const context=document.createElement('div');
+    context.className='user-message-context';
+    context.textContent=`Module SKB · ${moduleLabel}`;
+    const body=document.createElement('div');
+    body.className='user-message-text';
+    body.textContent=text;
+    msg.append(context,body);
     row.appendChild(msg);
     conversation.appendChild(row);
     forceFollowBottom();
@@ -457,15 +510,17 @@
 
     const content=document.createElement('div');
     content.className='message-content';
+    const sources=document.createElement('div');
+    sources.className='message-sources';
     const actions=document.createElement('div');
     actions.className='message-actions';
 
-    msg.append(details,content,actions);
+    msg.append(details,content,sources,actions);
     row.appendChild(msg);
     conversation.appendChild(row);
 
     const view={
-      id,row,msg,details,summaryText,stepList,content,actions,
+      id,row,msg,details,summaryText,stepList,content,sources,actions,
       steps:new Map(),startedAt:performance.now(),finished:false
     };
 
@@ -487,6 +542,9 @@
     if(t==='message.user.persisted') return 'user-persist';
     if(t==='context.snapshot'||t==='context.ready') return 'context';
     if(t.startsWith('context.compaction.')) return 'context-compaction';
+    if(t.startsWith('rag.retrieval.')) return 'rag-retrieval';
+    if(t.startsWith('rag.generation.')) return 'rag-generation';
+    if(t==='rag.failed') return 'rag-pipeline';
     if(t.startsWith('rules.pre.')) return 'pre-rules';
     if(t.startsWith('rule.action.')) return `rule-action:${d.rule_id||d.rule||'rule'}`;
     if(t.startsWith('reasoning.')) return 'reasoning';
@@ -510,6 +568,15 @@
     if(t==='context.compaction.skipped') return 'Compaction du contexte non nécessaire';
     if(t==='context.compaction.started') return 'Compression de l’ancien contexte';
     if(t==='context.compaction.completed') return 'Contexte compressé';
+    if(t==='rag.retrieval.started') return 'Recherche dans la base SKB';
+    if(t==='rag.retrieval.completed') return 'Sources SKB trouvées';
+    if(t==='rag.retrieval.failed') return 'Échec de la recherche SKB';
+    if(t.startsWith('rag.retrieval.')) return 'Recherche SKB';
+    if(t==='rag.generation.started') return 'Génération de la réponse sourcée';
+    if(t==='rag.generation.completed') return 'Réponse sourcée générée';
+    if(t==='rag.generation.failed') return 'Échec de la génération sourcée';
+    if(t.startsWith('rag.generation.')) return 'Génération sourcée';
+    if(t==='rag.failed') return 'Échec du traitement RAG';
     if(t==='rules.pre.started') return 'Vérification des règles fonctionnelles';
     if(t==='rules.pre.matched') return 'Règle fonctionnelle trouvée';
     if(t==='rules.pre.no_match') return 'Aucune règle prioritaire applicable';
@@ -588,7 +655,11 @@
     }
 
     if(payload.type==='assistant.started') return;
-    if(payload.type==='flow.completed'){ finishFlow(id,false); return; }
+    if(payload.type==='flow.completed'){
+      const status=String(payload.data?.status||'').toLowerCase();
+      finishFlow(id,['failed','error','source_unavailable'].includes(status));
+      return;
+    }
     if(payload.type==='assistant.completed') return;
     if(payload.type==='error'){ finishFlow(id,true); return; }
 
@@ -644,11 +715,69 @@
     const d=payload.data||{};
     const text=String(d.answer??d.response??d.text??'');
     const view=ensureFlowView(payload.request_id);
-    finishFlow(payload.request_id,false);
+    finishFlow(payload.request_id,d.status==='source_unavailable');
     view.content.textContent=text;
+    renderSources(view.sources,d.sources);
     view.actions.innerHTML='';
     (d.actions||[]).forEach(action=>view.actions.appendChild(createActionButton(action)));
     scrollChat();
+  }
+
+  function safeHttpUrl(value){
+    if(typeof value!=='string'||!value.trim()) return null;
+    try{
+      const url=new URL(value);
+      const safeProtocol=url.protocol==='http:'||url.protocol==='https:';
+      const safeHost=url.hostname.toLowerCase()==='skb.uniconsults.mu';
+      return safeProtocol&&safeHost?url.href:null;
+    }catch{
+      return null;
+    }
+  }
+
+  function renderSources(container,rawSources){
+    container.replaceChildren();
+    container.classList.remove('visible');
+    if(!Array.isArray(rawSources)) return;
+
+    const links=[];
+    rawSources.forEach((source,index)=>{
+      if(!source||typeof source!=='object') return;
+      const href=safeHttpUrl(source.url);
+      if(!href) return;
+
+      const link=document.createElement('a');
+      link.className='message-source';
+      link.href=href;
+      link.target='_blank';
+      link.rel='noopener';
+
+      const title=document.createElement('span');
+      title.className='message-source-title';
+      title.textContent=String(source.title||`Source ${index+1}`);
+      link.appendChild(title);
+
+      const metadata=[source.module,source.section]
+        .map(value=>String(value||'').trim())
+        .filter(Boolean);
+      if(metadata.length){
+        const meta=document.createElement('span');
+        meta.className='message-source-meta';
+        meta.textContent=metadata.join(' · ');
+        link.appendChild(meta);
+      }
+      links.push(link);
+    });
+
+    if(!links.length) return;
+    const title=document.createElement('div');
+    title.className='message-sources-title';
+    title.textContent='Sources SKB';
+    const list=document.createElement('div');
+    list.className='message-sources-list';
+    list.append(...links);
+    container.append(title,list);
+    container.classList.add('visible');
   }
 
   function createActionButton(action){
@@ -752,6 +881,11 @@
     socket.onclose=()=>{
       setConnectionState(false,'Déconnecté');
       $('connectionId').value='-';
+      for(const [id,view] of FLOW_VIEWS){
+        if(!view.finished) finishFlow(id,true);
+      }
+      $('emailSend').disabled=false;
+      $('emailSend').textContent='Envoyer';
     };
 
     socket.onerror=()=>toast('Erreur WebSocket. Vérifie le backend.','error');
@@ -831,9 +965,10 @@
     const text=input.value.trim();
     if(!text||!connected()) return;
 
-    const p=envelope('chat.message',{text});
+    const moduleScope=selectedModuleScope();
+    const p=envelope('chat.message',{text,module:moduleScope.namespace});
     autoFollow=true;
-    addUserMessage(text);
+    addUserMessage(text,moduleScope.label);
     ensureFlowView(p.request_id);
     send(p);
 

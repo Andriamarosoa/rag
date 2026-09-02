@@ -1,10 +1,10 @@
 # WebSocket workflow events
 
-Every server message uses the same envelope:
+Connect to `ws://localhost:8765/ws`. Every server message uses the same envelope:
 
 ```json
 {
-  "type": "rules.pre.matched",
+  "type": "rag.retrieval.completed",
   "request_id": "request-uuid",
   "user_id": "demo-user",
   "chat_id": "chat-uuid",
@@ -12,176 +12,145 @@ Every server message uses the same envelope:
 }
 ```
 
-`type` is the machine-readable event name. The frontend should branch on `type`, never on human-readable text.
+Clients must branch on the machine-readable `type`, not on display text.
 
-## Typical chat flow
+## Strict SKB chat flow
 
-A normal request uses one native Ollama model pass for semantic pre-rule classification and assistant reasoning:
+Send a question and an optional SKB module namespace:
+
+```json
+{
+  "type": "chat.message",
+  "request_id": "req-1",
+  "user_id": "user-123",
+  "chat_id": null,
+  "data": {
+    "text": "How do I reset my ESS password?",
+    "module": "spay"
+  }
+}
+```
+
+`module` may be `null` or one of the namespaces returned by `GET /skb/modules`.
+An unknown value produces an `error` event with `code=invalid_module`.
+
+The active `chat.message` event sequence is:
 
 ```text
 assistant.started
-flow.started
+flow.started                         mode=skb_grounded, module=<namespace|null>
 session.ready
 message.user.persisted
-context.snapshot
-context.compaction.skipped | context.compaction.started
-  model.request.started          operation=context_summarization
-  model.request.completed
-  context.compaction.completed
-context.ready
-rules.pre.started                integrated_with_reasoning=true
-reasoning.started                integrated_rule_matching=true
-model.request.started            provider=ollama_native operation=assistant_decision thinking_mode=disabled
-model.request.completed          provider=ollama_native operation=assistant_decision
-rules.pre.decision_parsed
-rules.pre.matched | rules.pre.no_match
+rag.retrieval.started                source_host=skb.uniconsults.mu
+rag.retrieval.completed              retrieved_count=N
 
-# If a rule directly answers:
-rule.action.started
-rule.action.completed            second_model_call=false
+# Emitted only when at least one trusted chunk passed the threshold:
+rag.generation.started               source_only=true
+rag.generation.completed             status=..., citation_count=N
 
-# If no direct-answer rule matched, the normal answer was already produced by
-# the same assistant_decision model request above.
-agent.suggested                  (optional)
-reasoning.completed
-
-rules.post.started
-rules.post.matched | rules.post.no_match
-agent.suggested                  (optional, from a post rule)
-response.fallback.applied        (optional)
 message.assistant.persisted
-context.snapshot
-context.compaction.skipped | context.compaction.started/completed
-flow.completed
+flow.completed                       grounded=true, source_count=N
 assistant.completed
 ```
 
-Except for context compaction when the token threshold is crossed, a normal chat request therefore produces a single `model.request.started/completed` pair.
+If retrieval, MariaDB, embeddings, or generation fails, the sequence contains
+`rag.failed`; the assistant then returns `status=source_unavailable`, the fixed
+temporary-unavailability message, and no sources. There is never a fallback to
+general model knowledge.
 
-## Connection and control events
+An unexpected exception outside that handled dependency path uses a distinct
+terminal branch:
+
+```text
+flow.failed                          error=<exception class>, message=<details>
+error                                code=flow_failed
+```
+
+This branch does not emit `assistant.completed`. Clients must therefore treat
+either `assistant.completed` or `flow.failed` as terminal for a submitted chat
+request, and should use the following `error` envelope to display the failure.
+
+When no relevant chunk is found, or the model returns an invalid/invented
+citation, generation is omitted or discarded and the result is:
+
+```json
+{
+  "status": "insufficient_information",
+  "answer": "Je n’ai pas trouvé cette information dans la base de connaissances Sicorax.",
+  "sources": [],
+  "citations": [],
+  "grounded": true
+}
+```
+
+An answered `assistant.completed` payload includes only application-validated
+SKB citations:
+
+```json
+{
+  "status": "answered",
+  "answer": "...",
+  "module": "spay",
+  "grounded": true,
+  "retrieved_count": 6,
+  "citations": ["chunk-id"],
+  "sources": [
+    {
+      "id": "chunk-id",
+      "page_id": "spay:faq:faq",
+      "title": "Frequently Asked Questions (FAQ)",
+      "section": "Login",
+      "module": "Payroll",
+      "url": "http://skb.uniconsults.mu/doku.php?id=spay%3Afaq%3Afaq",
+      "distance": 0.29
+    }
+  ],
+  "actions": [],
+  "matched_rules": [],
+  "matched_rule": null
+}
+```
+
+## Active chat events
+
+- `assistant.started`
+- `flow.started`
+- `session.ready`
+- `message.user.persisted`
+- `rag.retrieval.started`
+- `rag.retrieval.completed`
+- `rag.generation.started`
+- `rag.generation.completed`
+- `rag.failed`
+- `message.assistant.persisted`
+- `flow.completed`
+- `flow.failed`
+- `assistant.completed`
+- `error`
+
+Events expose status and counts, not the full prompt or retrieved documents.
+
+## Connection and explicit controls
 
 - `connection.ready`
 - `pong`
 - `rules.reload.started`
 - `rules.reloaded`
 - `rules.reload.failed`
-- `error`
-
-## Session/message events
-
-- `flow.started`
-- `session.ready`
-- `session.codex_thread.updated`
-- `message.user.persisted`
-- `message.assistant.persisted`
-- `flow.completed`
-- `flow.failed`
-
-## Context events
-
-- `context.snapshot`
-- `context.ready`
-- `context.compaction.skipped`
-- `context.compaction.started`
-- `context.compaction.completed`
-
-No full context or prompt is emitted in these events; only metadata such as token estimates and message counts.
-
-## Rule events
-
-- `rules.pre.started`
-- `rules.pre.decision_parsed`
-- `rules.pre.matched`
-- `rules.pre.no_match`
-- `rule.action.started`
-- `rule.action.completed`
-- `rule.action.unsupported`
-- `rules.post.started`
-- `rules.post.matched`
-- `rules.post.no_match`
-
-A semantic pre-rule match includes its `rule_id`, confidence, priority and action type. The rule engine does not call a model itself; it validates the rule decision returned by `assistant_decision` and enforces the configured action locally.
-
-## Model events
-
-- `model.request.started`
-- `model.request.completed`
-- `model.request.failed`
-- `reasoning.started`
-- `reasoning.completed`
-
-The main operations are:
-
-- `assistant_decision` — semantic rule classification + answer reasoning through Ollama native `/api/chat` with the real API field `think=false`
-- `context_summarization` — Codex/Ollama path used only when rolling context compaction is required
-
-### Native assistant-decision telemetry
-
-`model.request.started` includes:
-
-```json
-{
-  "provider": "ollama_native",
-  "model": "qwen3:8b",
-  "operation": "assistant_decision",
-  "thinking_mode": "disabled",
-  "thinking_control": "native_think_false",
-  "prompt_tokens_estimated": 700,
-  "timing_scope": "ollama_native_api"
-}
-```
-
-`model.request.completed` exposes both application wall-clock timing and Ollama's native response metrics:
-
-```json
-{
-  "elapsed_seconds": 2.1,
-  "ollama_total_seconds": 2.0,
-  "ollama_load_seconds": 0.1,
-  "ollama_prompt_eval_count": 710,
-  "ollama_prompt_eval_seconds": 0.8,
-  "ollama_prompt_tokens_per_second": 887.5,
-  "ollama_eval_count": 42,
-  "ollama_eval_seconds": 1.0,
-  "ollama_output_tokens_per_second": 42.0,
-  "metrics_source": "ollama_native_response",
-  "native_ollama_eval_metrics_available": true
-}
-```
-
-The native counts/durations are preferable to the `characters / 4` estimates when available. `elapsed_seconds` remains useful to detect HTTP/application overhead outside Ollama itself.
-
-Codex-backed operations still use `provider=codex_ollama` and report application wall-clock metrics because the legacy MCP/OpenAI Responses transport does not preserve Ollama's native timing fields.
-
-## Agent events
-
-When an agent is proposed by the reasoning model or a post-rule:
-
-- `agent.suggested`
-
-When the frontend explicitly executes an agent:
-
 - `agent.execution.started`
 - `agent.execution.completed`
 - `agent.execution.failed`
 - `agent.result`
 
-Write agents can still require `confirmed=true` before their code is allowed to run.
+The existing rule engine and agents remain available through explicit control
+messages (`rules.reload` and `agent.execute`). They are deliberately bypassed by
+`chat.message`, because their output is not necessarily supported by an SKB
+source. Write agents still require `confirmed=true`.
 
-## Example: deterministic math rule
+## Legacy internal events
 
-```text
-rules.pre.started
-reasoning.started
-model.request.started            provider=ollama_native operation=assistant_decision thinking_mode=disabled
-model.request.completed          operation=assistant_decision
-rules.pre.matched                rule_id=math_calculation
-rule.action.started
-rule.action.completed            second_model_call=false
-reasoning.completed
-message.assistant.persisted
-flow.completed
-assistant.completed
-```
-
-The response is enforced locally from the rule's canonical answer (`hahahaha`); no reformulation request is made.
+The codebase retains context/rule/Codex compatibility services, which can emit
+events such as `context.*`, `rules.pre.*`, `reasoning.*`, `model.request.*`, and
+`rules.post.*` when invoked directly by legacy tests or a future non-strict
+orchestrator. These events are not part of the currently wired strict SKB chat
+flow.

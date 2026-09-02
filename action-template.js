@@ -90,8 +90,9 @@
     const d = payload.data || {};
     const text = String(d.answer ?? d.response ?? d.text ?? '');
     const view = ensureFlowView(payload.request_id);
-    finishFlow(payload.request_id, false);
+    finishFlow(payload.request_id, d.status === 'source_unavailable');
     view.content.textContent = text;
+    renderSources(view.sources, d.sources);
     view.actions.innerHTML = '';
 
     const actions = Array.isArray(d.actions) ? d.actions : [];

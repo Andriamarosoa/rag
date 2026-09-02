@@ -1,241 +1,226 @@
-# RAG — WebSocket + Codex MCP + sessions + JSON rules + code agents
+# RAG — strict Sicorax Knowledge Base assistant
 
-Prototype backend for a functional assistant where the **frontend can ask arbitrary questions**. The application does not enumerate every possible question. Instead it combines:
+This project exposes a FastAPI/WebSocket assistant whose chat answers are grounded
+exclusively in the public Sicorax Knowledge Base (SKB):
 
-- a persistent WebSocket chat/session layer;
-- Codex as the local agent/reasoning harness through MCP;
-- Ollama as the configured local model provider behind Codex;
-- a single model pass for semantic rule classification + answer reasoning;
-- rolling context compaction around 50k estimated tokens;
-- functional rules defined in JSON;
-- code-defined agents/actions such as `send_email`;
-- explicit user confirmation before write actions;
-- code-agent suggestions are structured JSON, so worker models do not need native tool/function-calling support.
+<http://skb.uniconsults.mu/>
 
-## Architecture
+The strict chat path does not use the model's general knowledge. It retrieves
+relevant SKB sections from a persistent vector index, asks Qwen to answer from
+those sections only, validates the citations returned by the model, and abstains
+when the evidence is missing or unavailable.
 
-```text
-Frontend
-   │
-   │ WebSocket /ws
-   ▼
-FastAPI
-   │
-   ├── SessionStore (SQLite)
-   │      ├── user_id
-   │      ├── chat_id
-   │      ├── messages
-   │      ├── rolling summary
-   │      └── Codex thread_id
-   │
-   ├── ContextManager
-   │      └── compacts old context at ~50k tokens
-   │
-   ├── RuleEngine
-   │      ├── exposes + validates semantic PRE rules
-   │      ├── enforces accepted rule actions locally
-   │      └── evaluates deterministic POST rules
-   │
-   ├── AgentRegistry
-   │      └── send_email (code)
-   │
-   └── CodexService
-          └── one assistant_decision call
-                ├── semantic rule classification
-                ├── answer reasoning
-                └── agent suggestion
-                     │
-                     ▼
-                Codex MCP stdio
-                     │
-                     ▼
-                  Ollama
-```
+## Data and answer paths
 
-For a normal chat request below the context-compaction threshold, the intended model path is therefore:
+Indexing:
 
 ```text
-User message
-   ↓
-FastAPI
-   ↓
-Codex / Ollama     assistant_decision
-   ↓
-{
-  matched_rule,
-  rule_confidence,
-  status,
-  answer,
-  suggested_agent,
-  suggested_agent_args
-}
-   ↓
-RuleEngine validates/enforces locally
-   ↓
-POST rules + persistence
-   ↓
-WebSocket response
+DokuWiki index (do=index)
+    -> discover existing pages and namespaces
+    -> raw page export (do=export_raw)
+    -> clean DokuWiki markup
+    -> section-aware chunks with overlap
+    -> Ollama /api/embed (bge-m3 multilingual, 1024 dimensions)
+    -> MariaDB 11.8 LTS VECTOR(1024), cosine index
 ```
 
-There is no separate `pre_rule_matching` model request followed by a second `assistant_reasoning` request anymore.
-
-## Important Codex note (September 2026)
-
-This prototype contains the requested MCP connection using `codex mcp-server` and the historical `codex` / `codex-reply` tools.
-
-OpenAI deprecated `codex mcp-server` on **2026-08-24** in favor of **Codex App Server**. The Codex integration is intentionally isolated in `app/codex/client.py`, so the transport can be swapped later without changing WebSocket, session, context, rules, or agents.
-
-The MCP adapter invokes the `codex` tool with `sandbox=read-only` and `approval-policy=never` by default, so this reasoning bridge does not need shell escalation.
-
-If your installed Codex version still exposes MCP:
-
-```bash
-codex mcp-server
-```
-
-Otherwise implement an App Server adapter behind the same `CodexService` API.
-
-## Context management
-
-The context is persisted by `user_id + chat_id` in SQLite.
-
-Default behavior:
+Chat:
 
 ```text
-0 .. 49,999 estimated tokens
-    -> keep normal history
-
->= 50,000
-    -> keep ~12k newest tokens verbatim
-    -> summarize older messages into a rolling summary
-    -> discard compacted raw messages
-    -> continue from summary + recent messages
+Browser -> WebSocket chat.message {text, module}
+    -> embed the question with bge-m3
+    -> MariaDB cosine retrieval
+       (optional module filter, top-k and distance threshold)
+    -> Qwen receives only the retrieved SKB chunks
+    -> structured {status, answer, citation_ids}
+    -> application validates citation IDs and skb.uniconsults.mu URLs
+    -> assistant.completed {answer, sources, ...}
 ```
 
-Configuration:
+Important guarantees:
 
-```env
-CONTEXT_COMPACT_AT_TOKENS=50000
-CONTEXT_KEEP_RECENT_TOKENS=12000
-CONTEXT_SUMMARY_TARGET_TOKENS=8000
+- retrieved wiki text is treated as untrusted reference data, never as
+  instructions;
+- Qwen is instructed to support every factual statement from the supplied
+  chunks;
+- the application releases an answered result only when at least one returned
+  citation ID belongs to the retrieved set;
+- public source URLs are rebuilt from validated chunks and restricted to the SKB
+  host;
+- no relevant chunk, invalid JSON, an invalid citation, or an unsupported answer
+  produces the fixed abstention:
+  `Je n’ai pas trouvé cette information dans la base de connaissances Sicorax.`;
+- a retrieval or generation dependency failure produces:
+  `La base de connaissances Sicorax est temporairement indisponible.`;
+- there is no fallback to general model knowledge.
+
+## Runtime components
+
+- FastAPI and WebSocket transport;
+- SQLite chat/session persistence;
+- DokuWiki discovery and `export_raw` ingestion;
+- Ollama `bge-m3` multilingual embeddings (1024 dimensions);
+- MariaDB 11.8 LTS native `VECTOR` storage and cosine search;
+- Ollama/Qwen grounded answer generation with `think=false`;
+- a static HTML/JavaScript test UI;
+- the existing JSON rule engine and code-agent registry.
+
+Rules and agents remain available as explicit control operations, such as
+`rules.reload` and confirmed `agent.execute`. They are deliberately bypassed
+by `chat.message`: rule canonical answers and arbitrary agent output do not
+produce chat answers because they are not necessarily supported by SKB.
+
+## Supported modules
+
+The WebSocket payload uses the namespace in the first column. Use `null` to
+search all modules.
+
+| Namespace | Display label |
+| --- | --- |
+| `spay` | Payroll |
+| `shrm` | Human Resources |
+| `sgc` | Gestion Commerciale |
+| `sacc` | Accounting |
+| `sfar` | Fixed Asset |
+| `sef` | Equipment Follow-up |
+| `sim` | Incident Management |
+| `seam` | SEAM |
+| `pms` | PMS |
+| `sess` | SESS |
+
+`GET /skb/modules` is the authoritative runtime representation, including the
+DokuWiki start page and URL for every module.
+
+## Quick start with Docker
+
+Prerequisites:
+
+- Docker Compose;
+- an Ollama server reachable by the backend;
+- `qwen3:8b` and `bge-m3` installed on that Ollama server.
+
+Install the models on the configured remote Ollama server before starting the
+stack. From a PowerShell terminal that can reach that server, point the Ollama
+CLI explicitly at the remote endpoint:
+
+```powershell
+$env:OLLAMA_HOST = "http://100.89.128.87:11434"
+ollama pull qwen3:8b
+ollama pull bge-m3
 ```
 
-The tokenizer is intentionally model-agnostic and estimates roughly `characters / 4`. Replace `ContextManager.estimate_tokens()` with the tokenizer used by your active local model when exact accounting matters.
+```powershell
+docker compose up -d --build
+docker compose logs -f rag-backend
+```
 
-Context summarization is the main exception to the one-model-call chat path: if compaction is required, `context_summarization` is an additional Ollama request.
+The test UI is available at <http://localhost:8765/> and the health endpoint at
+<http://localhost:8765/health>.
 
-## Functional rules
+The backend creates the MariaDB vector schema and, with
+`SKB_SYNC_ON_STARTUP=true`, starts an incremental SKB sync in the background.
+Check progress instead of assuming that the first index is immediately ready:
 
-Rules live in `config/rules.json`; the code does not contain `if user asks exact phrase A` logic.
+```powershell
+Invoke-RestMethod http://localhost:8765/skb/index/status
+```
 
-### Example: semantic rule
+Run a synchronous refresh when required:
+
+```powershell
+Invoke-RestMethod -Method Post "http://localhost:8765/skb/index/sync?wait=true"
+```
+
+See [docs/docker.md](docs/docker.md) for runtime and configuration details.
+
+## HTTP API
+
+### Health
+
+```text
+GET /health
+```
+
+Reports the strict pipeline, configured models, vector store type, and current
+index initialization/running/error state. A healthy HTTP process does not imply
+that an external Ollama or MariaDB dependency is currently reachable; inspect
+`skb_index_error` and `/skb/index/status`.
+
+### Modules
+
+```text
+GET /skb/modules
+```
+
+Example:
 
 ```json
 {
-  "id": "password_reset",
-  "phase": "pre",
-  "description": "The user asks how to recover, reset, change, or regain access to a forgotten password.",
-  "when": { "type": "semantic" },
-  "then": {
-    "type": "respond",
-    "canonical_answer": "The user must contact their administrator to reset the password.",
-    "reformulate": true,
-    "allow_new_facts": false
-  }
+  "base_url": "http://skb.uniconsults.mu/",
+  "count": 10,
+  "modules": [
+    {
+      "id": "spay",
+      "label": "Payroll",
+      "start_page_id": "spay:spay",
+      "url": "http://skb.uniconsults.mu/doku.php?id=spay%3Aspay"
+    }
+  ]
 }
 ```
 
-So all of these can map to the same functional rule:
+### Semantic search
 
 ```text
-I forgot my password
-How can I reset my password?
-I cannot access my account anymore
-Where do I change my password?
+GET /skb/search?q=<question>&module=<namespace-or-label>&limit=5
 ```
 
-Codex/Ollama performs the semantic match **inside the same `assistant_decision` request that also reasons about the answer**. The local RuleEngine then checks the returned rule id/confidence before applying it.
+`module` is optional. Search embeds the query, performs cosine retrieval, and
+returns matching chunks with `id`, `page_id`, `title`, `url`, `module`,
+`section`, `snippet`, `score`, and `distance`. It returns HTTP 502 with
+`code=skb_vector_search_failed` when a dependency fails.
 
-For a `respond` rule:
-
-- `reformulate=false`: FastAPI ignores the model wording and returns `canonical_answer` exactly;
-- `reformulate=true`: the wording already produced during `assistant_decision` is used, with `canonical_answer` as fallback;
-- no second reformulation model call is made.
-
-This keeps mandatory business behavior in JSON while avoiding a second sequential Ollama request.
-
-### Example: deterministic output rule
-
-```json
-{
-  "id": "math_calculation",
-  "phase": "pre",
-  "priority": 200,
-  "description": "The user asks to perform a mathematical calculation.",
-  "when": { "type": "semantic" },
-  "then": {
-    "type": "respond",
-    "canonical_answer": "hahahaha",
-    "reformulate": false,
-    "allow_new_facts": false
-  }
-}
-```
-
-If this rule is accepted, the final answer is enforced locally as exactly `hahahaha`.
-
-### Example: fallback rule
-
-```json
-{
-  "id": "no_answer_suggest_email",
-  "phase": "post",
-  "when": {
-    "type": "result_state",
-    "field": "status",
-    "operator": "in",
-    "value": ["not_found", "insufficient_information"]
-  },
-  "then": {
-    "type": "suggest_agent",
-    "agent": "send_email",
-    "label": "Send an email",
-    "requires_confirmation": true
-  }
-}
-```
-
-This is a **functional state rule**, not a phrase matcher. POST rules are evaluated locally and do not require an Ollama call.
-
-## Code-defined agents
-
-Agents are registered in Python:
-
-```python
-agents.register(SendEmailAgent(settings))
-```
-
-Each agent exposes a specification:
+### Index status
 
 ```text
-name
-description
-input_schema
-write_action
-requires_confirmation
+GET /skb/index/status
 ```
 
-Write actions are not executed merely because the model suggests them. The frontend must explicitly send `confirmed: true`.
+The result contains:
 
-## WebSocket protocol
+- `initialized` and `running`;
+- `last_started_at`, `last_completed_at`, and `last_error`;
+- `last_result` with discovery, fetch, indexing, embedding, deletion, and error
+  counters;
+- `store` with current page, chunk, and module counts when MariaDB is
+  initialized.
 
-Connect:
+### Index sync
+
+```text
+POST /skb/index/sync
+POST /skb/index/sync?wait=true
+```
+
+Without `wait=true`, the endpoint schedules/reuses the background task and
+returns its current status. With it, the request waits for that task and then
+returns the final status. Inspect `last_error`: synchronization errors are
+reported in the status body.
+
+Synchronization is incremental. Page and index-signature hashes avoid
+re-embedding unchanged pages. Missing pages are deleted only after a complete,
+failure-free discovery/fetch pass; a partial upstream failure cannot purge the
+local index.
+
+## WebSocket chat
+
+Connect to:
 
 ```text
 ws://localhost:8765/ws
 ```
 
-### Send a chat message
+Send:
 
 ```json
 {
@@ -244,133 +229,110 @@ ws://localhost:8765/ws
   "user_id": "user-123",
   "chat_id": null,
   "data": {
-    "text": "I forgot my password. What should I do?"
+    "text": "How do I install Payroll?",
+    "module": "spay"
   }
 }
 ```
 
-The server returns the generated `chat_id`. Reuse it on following turns.
+`module` must be one of the ten namespaces above or `null`. An unknown value
+returns an `error` envelope with `code=invalid_module`. Reuse the generated
+`chat_id` for later messages.
 
-### Main model event
-
-A normal request should show one model operation:
-
-```text
-model.request.started    operation=assistant_decision
-model.request.completed  operation=assistant_decision
-```
-
-The model event also reports `provider=codex_ollama` and the configured model name.
-
-### Example assistant result
+An answered result includes application-validated sources:
 
 ```json
 {
   "type": "assistant.completed",
   "request_id": "req-1",
-  "user_id": "user-123",
-  "chat_id": "...",
+  "chat_id": "chat-uuid",
   "data": {
     "status": "answered",
-    "answer": "...",
-    "matched_rule": "password_reset",
-    "actions": []
-  }
-}
-```
-
-### No answer -> suggest email
-
-```json
-{
-  "type": "assistant.completed",
-  "data": {
-    "status": "insufficient_information",
-    "answer": "I do not have enough reliable information to answer this question.",
-    "actions": [
+    "answer": "Grounded answer in the user's language.",
+    "module": "spay",
+    "grounded": true,
+    "retrieved_count": 6,
+    "citations": ["chunk-id"],
+    "sources": [
       {
-        "type": "suggest_agent",
-        "agent": "send_email",
-        "label": "Send an email",
-        "requires_confirmation": true
+        "id": "chunk-id",
+        "page_id": "spay:install:installation",
+        "title": "Installation",
+        "section": "Install Payroll",
+        "module": "Payroll",
+        "url": "http://skb.uniconsults.mu/doku.php?id=spay%3Ainstall%3Ainstallation",
+        "distance": 0.21
       }
-    ]
+    ],
+    "actions": [],
+    "matched_rules": [],
+    "matched_rule": null
   }
 }
 ```
 
-### Execute the email agent
+The frontend renders the answer as text and sources as safe HTTP(S) links. It
+does not render model-provided HTML.
 
-First request without confirmation can be used as a preview/guard:
+If the chat orchestration raises an unexpected exception, the server emits
+`flow.failed`, then an `error` event with `code=flow_failed`. That failure
+branch does not emit `assistant.completed`.
 
-```json
-{
-  "type": "agent.execute",
-  "request_id": "email-1",
-  "user_id": "user-123",
-  "chat_id": "...",
-  "data": {
-    "agent": "send_email",
-    "arguments": {
-      "to": "help@example.com",
-      "subject": "Need help",
-      "body": "Hello, I need help with ..."
-    },
-    "confirmed": false
-  }
-}
-```
+See [docs/websocket-events.md](docs/websocket-events.md) for the full event flow.
 
-The server returns `confirmation_required`.
+## Configuration
 
-After the user confirms in the UI, send the same event with:
+Core RAG variables:
 
-```json
-"confirmed": true
-```
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SKB_BASE_URL` | `http://skb.uniconsults.mu/` | Allowed DokuWiki origin |
+| `SKB_REQUEST_TIMEOUT_SECONDS` | `15` | DokuWiki request timeout |
+| `SKB_CRAWL_CONCURRENCY` | `3` | Concurrent DokuWiki requests |
+| `SKB_EMBEDDING_BASE_URL` | `http://100.89.128.87:11434` | Ollama embedding API root |
+| `SKB_EMBEDDING_MODEL` | `bge-m3` | Multilingual embedding model |
+| `SKB_EMBEDDING_DIMENSION` | `1024` | Vector dimension; must match the model and table |
+| `SKB_EMBEDDING_BATCH_SIZE` | `16` | Inputs per `/api/embed` call |
+| `SKB_EMBEDDING_TIMEOUT_SECONDS` | `180` | Embedding request timeout |
+| `SKB_CHUNK_SIZE` | `1600` | Target maximum chunk characters |
+| `SKB_CHUNK_OVERLAP` | `200` | Character overlap |
+| `SKB_MIN_CHUNK_SIZE` | `80` | Small-tail merge threshold |
+| `SKB_RETRIEVAL_TOP_K` | `6` | Maximum chunks for chat retrieval |
+| `SKB_RETRIEVAL_MAX_DISTANCE` | `0.45` | Maximum cosine distance |
+| `SKB_ANSWER_MAX_CONTEXT_CHARACTERS` | `24000` | Evidence budget sent to Qwen |
+| `SKB_SYNC_ON_STARTUP` | `true` | Schedule incremental sync after startup |
+| `OLLAMA_BASE_URL` | `http://100.89.128.87:11434` | Qwen native API root |
+| `OLLAMA_MODEL` | `qwen3:8b` | Grounded answer model |
 
-## Run
+MariaDB variables:
 
-Prerequisites:
+| Variable | Local default | Docker value/default |
+| --- | --- | --- |
+| `DB_HOST` | `127.0.0.1` | `mariadb` |
+| `DB_PORT` | `3307` | `3306` |
+| `DB_USER` | `myuser` | `myuser` |
+| `DB_PASSWORD` | `myuserpassword` | `myuserpassword` |
+| `DB_NAME` | `sicorax` | `sicorax` |
+| `DB_POOL_MIN_SIZE` | `1` | `1` |
+| `DB_POOL_MAX_SIZE` | `5` | `5` |
+| `DB_CONNECT_TIMEOUT_SECONDS` | `10` | `10` |
 
-- Python 3.11+
-- Codex CLI installed and authenticated/configured
-- a Codex version that still supports `codex mcp-server`, or a future App Server adapter
+Use a local `.env` and replace the development database credentials outside
+local development. `.env`, database data, and Codex state are ignored by Git.
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
-cp .env.example .env
+`SKB_MODULE_CACHE_SECONDS` and `SKB_SEARCH_MAX_PAGES` remain as legacy
+lexical-client settings; they do not control the strict persistent vector index.
+
+## Local Python development
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
+pytest
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8765
 ```
 
-Windows PowerShell activation:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
-
-Health check:
-
-```text
-GET http://localhost:8765/health
-```
-
-## Local-model-only setup
-
-This repository does **not** hard-code an OpenAI-hosted model. The Docker entrypoint configures Codex to use the Ollama provider and the remote OpenAI-compatible Ollama endpoint.
-
-Do not store model/API credentials in this repository. Keep them in your local Codex/Ollama configuration or environment.
-
-## Next architectural step
-
-Because `codex mcp-server` is now deprecated, the next version should implement:
-
-```text
-CodexGateway
-├── McpCodexClient       # legacy/requested prototype
-└── AppServerCodexClient # recommended current transport
-```
-
-The rest of the application should remain unchanged.
+Python 3.11+ and MariaDB 11.8 LTS or newer are required. The Ollama embedding
+dimension must match `SKB_EMBEDDING_DIMENSION`; an existing incompatible vector
+table is rejected rather than silently reused.

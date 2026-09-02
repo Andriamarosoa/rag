@@ -1,116 +1,232 @@
 # Docker runtime
 
-The application runtime is split into two containers:
+## Topology
 
-```text
+~~~text
 Browser
    |
-   | http/ws :8765
+   | HTTP/WebSocket :8765
    v
 rag-backend
-   |- FastAPI
-   |- Python runtime
-   |- Node.js 24
-   |- Codex CLI 0.146.1
-   |- Codex stdio MCP child process
+   |- FastAPI and SQLite chat sessions
+   |- DokuWiki indexer and chunker
+   |- Ollama embedding and chat clients
+   |- validated-citation answer service
    |
-   | Tailscale / host network route
-   v
-100.89.128.87:11434
-   `- Ollama (Mac)
+   +---- HTTP ----> skb.uniconsults.mu
+   |                 do=index and do=export_raw
+   |
+   +---- HTTP ----> 100.89.128.87:11434
+   |                 bge-m3 and qwen3:8b
+   |
+   +---- MySQL ---> mariadb:3306
+                     MariaDB 11.8 LTS VECTOR cosine index
 
 mariadb
-   `- MariaDB 11.7 on host port 3307
-```
+   `- host port 3307, persistent ./mariadb_data
+~~~
 
-Codex is intentionally installed in the same container as FastAPI because the current adapter communicates with Codex through MCP over stdin/stdout.
+The strict chat.message route embeds the question, performs module-filtered
+MariaDB cosine retrieval, asks Qwen to generate from retrieved SKB chunks only,
+validates citation IDs and SKB URLs, and returns an answer with sources or an
+abstention.
 
-## Start everything
+JSON rules, Codex compatibility code, and code agents remain in the container
+for explicit control operations. They are not part of chat answer generation.
+
+## Prerequisites
+
+- Docker Desktop and Docker Compose;
+- network access from Docker to <http://skb.uniconsults.mu/>;
+- an Ollama endpoint reachable from Docker;
+- qwen3:8b and bge-m3 installed on that Ollama server.
+
+Install the models on the configured remote Ollama server, not in the backend
+container. From a PowerShell terminal that can reach the default remote host,
+point the Ollama CLI explicitly at it:
+
+~~~powershell
+$env:OLLAMA_HOST = "http://100.89.128.87:11434"
+ollama pull qwen3:8b
+ollama pull bge-m3
+~~~
+
+`bge-m3` is the multilingual 1024-dimension embedding model used for both SKB
+chunks and user questions.
+
+## Start
 
 From the repository root:
 
-```powershell
+~~~powershell
 docker compose up -d --build
-```
-
-Follow the backend logs:
-
-```powershell
+docker compose ps
 docker compose logs -f rag-backend
-```
+~~~
 
-Expected startup lines include:
+Open:
 
-```text
-[rag] Codex: codex-cli 0.146.1
-[rag] Codex model: qwen3:8b
-[rag] Ollama endpoint: http://100.89.128.87:11434/v1
-[rag] Ollama reachable
-```
+- UI: <http://localhost:8765/>
+- health: <http://localhost:8765/health>
+- index status: <http://localhost:8765/skb/index/status>
 
-Open the WebSocket test UI:
+The health endpoint starts even if an external dependency is unavailable.
+ok=true means the HTTP application is running; also inspect
+skb_index_initialized, skb_index_running, and skb_index_error.
 
-```text
-http://localhost:8765/
-```
+## Initial and incremental index sync
 
-Health endpoint:
+When SKB_SYNC_ON_STARTUP=true, startup initializes the MariaDB schema and
+schedules a background sync. The server does not wait for a potentially long
+first ingestion before serving HTTP.
 
-```powershell
-curl.exe http://localhost:8765/health
-```
+Monitor it:
 
-## Verify Codex inside Docker
+~~~powershell
+Invoke-RestMethod http://localhost:8765/skb/index/status |
+  ConvertTo-Json -Depth 8
+~~~
 
-```powershell
-docker compose exec rag-backend codex --version
-```
+Start or join a sync and wait for completion:
 
-Inspect the generated local-only Codex provider:
+~~~powershell
+Invoke-RestMethod -Method Post "http://localhost:8765/skb/index/sync?wait=true" |
+  ConvertTo-Json -Depth 8
+~~~
 
-```powershell
-docker compose exec rag-backend cat /root/.codex/config.toml
-```
+Start it asynchronously:
 
-It should point to the `ollama-rag` provider and not the OpenAI provider.
+~~~powershell
+Invoke-RestMethod -Method Post "http://localhost:8765/skb/index/sync"
+~~~
 
-## Verify Docker can reach Ollama
+The status object reports:
 
-Windows being able to reach the Tailscale IP does not automatically prove Docker Desktop can use the same route. Test from inside the backend container:
+- initialized and running;
+- last start/completion times and last_error;
+- last_result counters such as discovered_pages, fetched_pages,
+  unchanged_pages, indexed_pages, failed_pages, embedded_chunks,
+  upserted_chunks, and deletions;
+- store.pages, store.chunks, and store.modules.
 
-```powershell
-docker compose exec rag-backend curl -sS http://100.89.128.87:11434/v1/models
-```
+Sync is hash-based and incremental. The index signature includes the embedding
+model, dimension, and chunk settings, so changing one makes affected pages
+eligible for re-indexing. Missing local pages are deleted only after the
+complete discovery/fetch pass succeeds without page failures.
 
-If this returns the Ollama model list, the complete path is available:
+## Verify the strict pipeline
 
-```text
-FastAPI container -> Codex CLI -> Ollama on 100.89.128.87
-```
+List modules:
 
-If it fails while the same curl works directly from Windows, the remaining problem is Docker Desktop/Tailscale routing rather than FastAPI, Codex or Ollama.
+~~~powershell
+Invoke-RestMethod http://localhost:8765/skb/modules |
+  ConvertTo-Json -Depth 5
+~~~
+
+Test retrieval across all modules:
+
+~~~powershell
+Invoke-RestMethod "http://localhost:8765/skb/search?q=install%20payroll&limit=5" |
+  ConvertTo-Json -Depth 6
+~~~
+
+Test a module filter:
+
+~~~powershell
+Invoke-RestMethod "http://localhost:8765/skb/search?q=leave&module=spay&limit=5" |
+  ConvertTo-Json -Depth 6
+~~~
+
+Results include cosine distance and score=1-distance. Results beyond
+SKB_RETRIEVAL_MAX_DISTANCE are excluded.
 
 ## Configuration
 
-Defaults:
+Create a local .env from .env.example. Important Docker defaults:
 
-```env
-CODEX_VERSION=0.146.1
-CODEX_MODEL=qwen3:8b
-CODEX_OSS_BASE_URL=http://100.89.128.87:11434/v1
+~~~env
 APP_PORT=8765
-```
 
-Override them in a local `.env` file if needed. `.env` is ignored by Git.
+SKB_BASE_URL=http://skb.uniconsults.mu/
+SKB_REQUEST_TIMEOUT_SECONDS=15
+SKB_CRAWL_CONCURRENCY=3
+SKB_SYNC_ON_STARTUP=true
+
+SKB_EMBEDDING_BASE_URL=http://100.89.128.87:11434
+SKB_EMBEDDING_MODEL=bge-m3
+SKB_EMBEDDING_DIMENSION=1024
+SKB_EMBEDDING_BATCH_SIZE=16
+SKB_EMBEDDING_TIMEOUT_SECONDS=180
+
+SKB_CHUNK_SIZE=1600
+SKB_CHUNK_OVERLAP=200
+SKB_MIN_CHUNK_SIZE=80
+SKB_RETRIEVAL_TOP_K=6
+SKB_RETRIEVAL_MAX_DISTANCE=0.45
+SKB_ANSWER_MAX_CONTEXT_CHARACTERS=24000
+
+OLLAMA_BASE_URL=http://100.89.128.87:11434
+OLLAMA_MODEL=qwen3:8b
+
+DB_USER=myuser
+DB_PASSWORD=myuserpassword
+DB_NAME=sicorax
+DB_POOL_MIN_SIZE=1
+DB_POOL_MAX_SIZE=5
+DB_CONNECT_TIMEOUT_SECONDS=10
+~~~
+
+Compose fixes the backend's internal database route to DB_HOST=mariadb and
+DB_PORT=3306. From Windows, MariaDB is exposed on 127.0.0.1:3307.
+
+The vector dimension is a schema contract. The backend refuses an existing
+skb_chunks.embedding column whose dimension differs from
+SKB_EMBEDDING_DIMENSION.
+
+SKB_MODULE_CACHE_SECONDS and SKB_SEARCH_MAX_PAGES belong to the legacy bounded
+lexical crawler and do not affect the strict vector path.
+
+## Network checks
+
+Verify Ollama from inside the backend container:
+
+~~~powershell
+docker compose exec rag-backend curl -fsS http://100.89.128.87:11434/api/tags
+~~~
+
+Verify SKB:
+
+~~~powershell
+docker compose exec rag-backend curl -fsS "http://skb.uniconsults.mu/doku.php?do=export_raw&id=start"
+~~~
+
+Verify MariaDB:
+
+~~~powershell
+docker compose exec mariadb mariadb -umyuser -pmyuserpassword sicorax -e "SELECT VERSION();"
+~~~
+
+MariaDB 11.8 LTS or newer is required because the schema uses native
+VECTOR(1024), a VECTOR INDEX with DISTANCE=cosine, and VEC_DISTANCE_COSINE.
 
 ## Persistence
 
-The following host directories survive container recreation:
+~~~text
+./mariadb_data -> SKB pages, chunks, embeddings, and vector index
+./data         -> SQLite chat/session state
+./codex_data   -> Codex compatibility state and configuration
+~~~
 
-```text
-./mariadb_data  -> MariaDB data
-./data          -> application SQLite/session state for the current prototype
-./codex_data    -> Codex state/threads/config
-```
+These directories and .env are ignored by Git. Replace the example MariaDB
+credentials beyond isolated local development.
 
-`mariadb_data/` and `codex_data/` are ignored by Git.
+## Failure behavior
+
+- Empty or below-threshold retrieval: fixed insufficient_information
+  abstention with no sources.
+- MariaDB, embedding, or Qwen failure during chat: source_unavailable with no
+  sources.
+- Invalid or model-invented citation IDs: generated text is discarded and
+  replaced by the abstention.
+- Sync errors appear in /skb/index/status; inspect last_error even when the sync
+  endpoint returned a status document.

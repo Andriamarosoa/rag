@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from time import perf_counter
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.agents.registry import AgentRegistry
 from app.codex.service import CodexService
@@ -11,6 +11,9 @@ from app.rules.engine import RuleEngine
 from app.rules.models import FunctionalRule
 from app.sessions.models import ChatMessage
 from app.sessions.store import SessionStore
+
+if TYPE_CHECKING:
+    from app.grounded_answer import GroundedAnswerService
 
 
 class Orchestrator:
@@ -25,12 +28,14 @@ class Orchestrator:
         rules: RuleEngine,
         agents: AgentRegistry,
         codex: CodexService,
+        grounded_answer: GroundedAnswerService | None = None,
     ):
         self.store = store
         self.context = context
         self.rules = rules
         self.agents = agents
         self.codex = codex
+        self.grounded_answer = grounded_answer
 
     @staticmethod
     def _branch_items(branch: Any) -> list[Any]:
@@ -675,13 +680,192 @@ class Orchestrator:
             control_depth=0,
         )
 
+    async def _handle_grounded_message(
+        self,
+        user_id: str,
+        chat_id: str | None,
+        text: str,
+        emit: FlowEmitter | None,
+        *,
+        module: str | None,
+    ) -> dict[str, Any]:
+        """Handle the strict SKB path without exposing general model knowledge.
+
+        Functional rules and arbitrary agents deliberately do not participate in this
+        branch: their canonical outputs are not necessarily backed by an SKB page.
+        """
+        assert self.grounded_answer is not None
+
+        await emit_flow(
+            emit,
+            "flow.started",
+            user_id=user_id,
+            requested_chat_id=chat_id,
+            mode="skb_grounded",
+            module=module,
+        )
+        chat = await self.store.get_or_create_chat(user_id=user_id, chat_id=chat_id)
+        await emit_flow(
+            emit,
+            "session.ready",
+            user_id=user_id,
+            chat_id=chat.id,
+            existing=bool(chat_id),
+            has_codex_thread=False,
+        )
+
+        prior_messages = await self.store.list_messages(chat.id)
+
+        await self.store.append_message(
+            ChatMessage(
+                chat_id=chat.id,
+                role="user",
+                content=text,
+                metadata={"module": module, "grounded": True},
+            )
+        )
+        await emit_flow(
+            emit,
+            "message.user.persisted",
+            chat_id=chat.id,
+            chars=len(text),
+            module=module,
+        )
+
+        try:
+            retrieval_question = await self.grounded_answer.rewrite_question(
+                text,
+                prior_messages,
+                module=module,
+            )
+            await emit_flow(
+                emit,
+                "rag.retrieval.started",
+                module=module,
+                source_host=self.grounded_answer.allowed_host,
+                reformulated=retrieval_question != " ".join(text.split()).strip(),
+            )
+            chunks = await self.grounded_answer.retrieve(
+                retrieval_question,
+                module=module,
+            )
+            await emit_flow(
+                emit,
+                "rag.retrieval.completed",
+                module=module,
+                retrieved_count=len(chunks),
+            )
+
+            if chunks:
+                await emit_flow(
+                    emit,
+                    "rag.generation.started",
+                    retrieved_count=len(chunks),
+                    source_only=True,
+                )
+            result = await self.grounded_answer.answer_from_chunks(
+                retrieval_question,
+                chunks,
+                module=module,
+            )
+            result["retrieval_query"] = retrieval_question
+            if chunks:
+                await emit_flow(
+                    emit,
+                    "rag.generation.completed",
+                    status=result.get("status"),
+                    citation_count=len(result.get("sources") or []),
+                )
+        except Exception as exc:
+            await emit_flow(
+                emit,
+                "rag.failed",
+                error=type(exc).__name__,
+                module=module,
+            )
+            result = {
+                "status": "source_unavailable",
+                "answer": self.grounded_answer.UNAVAILABLE_ANSWER,
+                "sources": [],
+                "citations": [],
+                "module": module,
+                "retrieved_count": 0,
+                "grounded": True,
+                "actions": [],
+                "matched_rules": [],
+                "matched_rule": None,
+            }
+
+        answer = str(result.get("answer") or "")
+        sources = [
+            {
+                "id": source.get("id"),
+                "page_id": source.get("page_id"),
+                "url": source.get("url"),
+                "module": source.get("module"),
+                "section": source.get("section"),
+            }
+            for source in result.get("sources", [])
+            if isinstance(source, dict)
+        ]
+        await self.store.append_message(
+            ChatMessage(
+                chat_id=chat.id,
+                role="assistant",
+                content=answer,
+                metadata={
+                    "status": result.get("status"),
+                    "module": module,
+                    "grounded": True,
+                    "sources": sources,
+                },
+            )
+        )
+        await emit_flow(
+            emit,
+            "message.assistant.persisted",
+            chat_id=chat.id,
+            status=result.get("status"),
+            chars=len(answer),
+            source_count=len(sources),
+        )
+
+        result["chat_id"] = chat.id
+        await emit_flow(
+            emit,
+            "flow.completed",
+            chat_id=chat.id,
+            status=result.get("status"),
+            module=module,
+            grounded=True,
+            source_count=len(sources),
+            action_count=0,
+            matched_rule=None,
+            matched_rules=[],
+            matched_rule_count=0,
+            rule_output_count=0,
+            post_message_count=0,
+        )
+        return result
+
     async def handle_message(
         self,
         user_id: str,
         chat_id: str | None,
         text: str,
         emit: FlowEmitter | None = None,
+        *,
+        module: str | None = None,
     ) -> dict[str, Any]:
+        if self.grounded_answer is not None:
+            return await self._handle_grounded_message(
+                user_id,
+                chat_id,
+                text,
+                emit,
+                module=module,
+            )
+
         await emit_flow(emit, "flow.started", user_id=user_id, requested_chat_id=chat_id)
 
         chat = await self.store.get_or_create_chat(user_id=user_id, chat_id=chat_id)
