@@ -35,7 +35,10 @@
           "reformulate": true,
           "allow_new_facts": false
         },
-        "no_answer_suggest_email"
+        {
+          "ref": "no_answer_suggest_email",
+          "label": "Send an email too"
+        }
       ]
     },
     {
