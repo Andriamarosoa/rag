@@ -53,15 +53,33 @@ class RuleEngine:
             emit=emit,
         )
         rule_id = decision.get("rule_id")
-        confidence = float(decision.get("confidence") or 0)
-        if not rule_id or confidence < 0.65:
+        raw_confidence = decision.get("confidence")
+        confidence = float(raw_confidence) if raw_confidence is not None else None
+        parse_mode = decision.get("parse_mode")
+
+        if not rule_id:
             await emit_flow(
                 emit,
                 "rules.pre.no_match",
-                reason="below_confidence_threshold" if rule_id else "model_returned_null",
+                reason="unparseable_model_output" if parse_mode == "unparseable" else "model_returned_null",
+                proposed_rule_id=None,
+                confidence=confidence,
+                threshold=0.65,
+                parse_mode=parse_mode,
+            )
+            return None
+
+        # Confidence is useful when the model provides it, but absence of that optional score
+        # must not erase an otherwise explicit, exact selection of a configured rule id.
+        if confidence is not None and confidence < 0.65:
+            await emit_flow(
+                emit,
+                "rules.pre.no_match",
+                reason="below_confidence_threshold",
                 proposed_rule_id=rule_id,
                 confidence=confidence,
                 threshold=0.65,
+                parse_mode=parse_mode,
             )
             return None
 
@@ -73,6 +91,7 @@ class RuleEngine:
                 reason="unknown_rule_id",
                 proposed_rule_id=rule_id,
                 confidence=confidence,
+                parse_mode=parse_mode,
             )
             return None
 
@@ -83,6 +102,7 @@ class RuleEngine:
             confidence=confidence,
             priority=matched.priority,
             action_type=matched.then.get("type"),
+            parse_mode=parse_mode,
         )
         return matched
 
