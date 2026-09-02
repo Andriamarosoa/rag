@@ -14,3 +14,46 @@ services:
       - "3307:3306"
     volumes:
       - ./mariadb_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  rag-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        CODEX_VERSION: ${CODEX_VERSION:-0.146.1}
+    container_name: rag-backend
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: ${APP_PORT:-8765}
+      DATABASE_PATH: /app/data/rag.db
+      RULES_PATH: /app/config/rules.json
+
+      # Codex CLI is installed inside this container and launched by the backend over stdio MCP.
+      CODEX_COMMAND: codex
+      CODEX_ARGS: mcp-server
+      CODEX_CWD: /app
+      CODEX_MODEL: ${CODEX_MODEL:-qwen3:8b}
+      CODEX_OSS_BASE_URL: ${CODEX_OSS_BASE_URL:-http://100.89.128.87:11434/v1}
+      OPENAI_API_KEY: ollama
+      CODEX_SANDBOX: ${CODEX_SANDBOX:-read-only}
+      CODEX_APPROVAL_POLICY: never
+
+      CONTEXT_COMPACT_AT_TOKENS: ${CONTEXT_COMPACT_AT_TOKENS:-50000}
+      CONTEXT_KEEP_RECENT_TOKENS: ${CONTEXT_KEEP_RECENT_TOKENS:-12000}
+      CONTEXT_SUMMARY_TARGET_TOKENS: ${CONTEXT_SUMMARY_TARGET_TOKENS:-8000}
+    ports:
+      - "${APP_PORT:-8765}:${APP_PORT:-8765}"
+    volumes:
+      # Source is visible to Codex but not writable from the container.
+      - .:/app:ro
+      # Runtime state remains writable and persistent.
+      - ./data:/app/data
+      - ./codex_data:/root/.codex
