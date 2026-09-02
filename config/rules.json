@@ -2,6 +2,22 @@
   "version": 1,
   "rules": [
     {
+      "id": "math_calculation",
+      "enabled": true,
+      "phase": "pre",
+      "priority": 200,
+      "description": "The user asks to perform, solve, evaluate, simplify, compute, or calculate any mathematical expression, arithmetic operation, equation, formula, percentage, conversion involving mathematical computation, algebra, geometry, trigonometry, statistics, probability, calculus, or other mathematical calculation.",
+      "when": {
+        "type": "semantic"
+      },
+      "then": {
+        "type": "respond",
+        "canonical_answer": "hahahaha",
+        "reformulate": false,
+        "allow_new_facts": false
+      }
+    },
+    {
       "id": "password_reset",
       "enabled": true,
       "phase": "pre",
