@@ -46,6 +46,21 @@ def build_router(
                 if event.chat_id:
                     session.chat_id = event.chat_id
 
+                async def send_flow_event(event_type: str, data: dict) -> None:
+                    event_chat_id = data.get("chat_id")
+                    if event_chat_id:
+                        session.chat_id = str(event_chat_id)
+                    await manager.send(
+                        session,
+                        ServerEnvelope(
+                            type=event_type,
+                            request_id=event.request_id,
+                            user_id=event.user_id,
+                            chat_id=session.chat_id,
+                            data=data,
+                        ).model_dump(),
+                    )
+
                 if event.type == "ping":
                     await manager.send(
                         session,
@@ -54,14 +69,22 @@ def build_router(
                     continue
 
                 if event.type == "rules.reload":
-                    loaded = rules.reload()
+                    await send_flow_event("rules.reload.started", {})
+                    try:
+                        loaded = rules.reload()
+                    except Exception as exc:
+                        await send_flow_event(
+                            "rules.reload.failed",
+                            {"error": type(exc).__name__, "message": str(exc)},
+                        )
+                        continue
                     await manager.send(
                         session,
                         ServerEnvelope(
                             type="rules.reloaded",
                             request_id=event.request_id,
                             user_id=event.user_id,
-                            chat_id=event.chat_id,
+                            chat_id=session.chat_id,
                             data={"version": loaded.version, "count": len(loaded.rules)},
                         ).model_dump(),
                     )
@@ -71,14 +94,40 @@ def build_router(
                     name = str(event.data.get("agent", ""))
                     arguments = event.data.get("arguments") or {}
                     confirmed = bool(event.data.get("confirmed", False))
-                    result = await agents.execute(name, arguments, confirmed=confirmed)
+                    agent = agents.get(name)
+                    await send_flow_event(
+                        "agent.execution.started",
+                        {
+                            "agent": name,
+                            "arguments": arguments,
+                            "confirmed": confirmed,
+                            "requires_confirmation": agent.spec.requires_confirmation if agent else None,
+                        },
+                    )
+                    try:
+                        result = await agents.execute(name, arguments, confirmed=confirmed)
+                    except Exception as exc:
+                        await send_flow_event(
+                            "agent.execution.failed",
+                            {"agent": name, "error": type(exc).__name__, "message": str(exc)},
+                        )
+                        continue
+                    await send_flow_event(
+                        "agent.execution.completed",
+                        {
+                            "agent": name,
+                            "ok": result.ok,
+                            "data": result.data,
+                            "error": result.error,
+                        },
+                    )
                     await manager.send(
                         session,
                         ServerEnvelope(
                             type="agent.result",
                             request_id=event.request_id,
                             user_id=event.user_id,
-                            chat_id=event.chat_id,
+                            chat_id=session.chat_id,
                             data={"agent": name, "ok": result.ok, "data": result.data, "error": result.error},
                         ).model_dump(),
                     )
@@ -99,10 +148,33 @@ def build_router(
                             type="assistant.started",
                             request_id=event.request_id,
                             user_id=event.user_id,
-                            chat_id=event.chat_id,
+                            chat_id=session.chat_id,
                         ).model_dump(),
                     )
-                    result = await orchestrator.handle_message(event.user_id, event.chat_id, text)
+                    try:
+                        result = await orchestrator.handle_message(
+                            event.user_id,
+                            event.chat_id,
+                            text,
+                            emit=send_flow_event,
+                        )
+                    except Exception as exc:
+                        await send_flow_event(
+                            "flow.failed",
+                            {"error": type(exc).__name__, "message": str(exc)},
+                        )
+                        await manager.send(
+                            session,
+                            ServerEnvelope(
+                                type="error",
+                                request_id=event.request_id,
+                                user_id=event.user_id,
+                                chat_id=session.chat_id,
+                                data={"code": "flow_failed", "message": str(exc)},
+                            ).model_dump(),
+                        )
+                        continue
+
                     session.chat_id = result["chat_id"]
                     await manager.send(
                         session,
