@@ -33,10 +33,9 @@ class IsolatedDecisionService(CodexService):
                         "properties": {
                             "rule_id": {"type": "string", "enum": valid_rule_ids},
                             "confidence": {
-                                "anyOf": [
-                                    {"type": "number", "minimum": 0, "maximum": 1},
-                                    {"type": "null"},
-                                ]
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": 1,
                             },
                         },
                         "required": ["rule_id", "confidence"],
@@ -234,6 +233,7 @@ ABSOLUTE ISOLATION RULES:
 - You have no conversation history and must not assume any previous user intent.
 - Compare every clause/request in the latest message independently with every rule.
 - Return every applicable rule, ordered by priority descending.
+- Return an explicit confidence from 0 to 1 for EVERY proposed rule. Never use null.
 - `has_uncovered_request` is true when any request/question in the latest message is not covered
   by the matched rules. If no rule matches, it is true for any non-empty user request.
 - Similar vocabulary or an entity associated with a rule is NOT enough: the current message must
