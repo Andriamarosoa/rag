@@ -1,0 +1,11 @@
+.git
+.gitignore
+.venv
+__pycache__
+.pytest_cache
+*.pyc
+.env
+mariadb_data
+codex_data
+data/*.db
+data/*.db-*
