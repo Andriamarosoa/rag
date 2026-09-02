@@ -15,7 +15,7 @@ services:
     volumes:
       - ./mariadb_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      test: ["CMD", "healthcheck.sh", "--innodb_initialized"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -49,6 +49,13 @@ services:
       # assistant_decision uses Ollama native /api/chat so `think:false` is a real API control.
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://100.89.128.87:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:8b}
+
+      # SKB knowledge base. Modules are discovered at startup and injected through
+      # search_skb's input schema into the assistant_decision prompt.
+      SKB_BASE_URL: ${SKB_BASE_URL:-http://skb.uniconsults.mu/}
+      SKB_REQUEST_TIMEOUT_SECONDS: ${SKB_REQUEST_TIMEOUT_SECONDS:-5}
+      SKB_MODULE_CACHE_SECONDS: ${SKB_MODULE_CACHE_SECONDS:-600}
+      SKB_SEARCH_MAX_PAGES: ${SKB_SEARCH_MAX_PAGES:-30}
 
       CONTEXT_COMPACT_AT_TOKENS: ${CONTEXT_COMPACT_AT_TOKENS:-50000}
       CONTEXT_KEEP_RECENT_TOKENS: ${CONTEXT_KEEP_RECENT_TOKENS:-12000}
