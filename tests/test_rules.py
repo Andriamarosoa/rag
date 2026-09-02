@@ -27,3 +27,35 @@ def test_legacy_single_then_action_is_normalized_to_array():
     )
 
     assert rule.then == [{"type": "respond", "canonical_answer": "ok"}]
+
+
+def test_then_accepts_rule_id_references_mixed_with_actions():
+    rule = FunctionalRule.model_validate(
+        {
+            "id": "composed",
+            "phase": "pre",
+            "when": {"type": "semantic"},
+            "then": [
+                "shared_response",
+                {"type": "suggest_agent", "agent": "send_email"},
+            ],
+        }
+    )
+
+    assert rule.then == [
+        "shared_response",
+        {"type": "suggest_agent", "agent": "send_email"},
+    ]
+
+
+def test_single_rule_id_then_is_normalized_to_array():
+    rule = FunctionalRule.model_validate(
+        {
+            "id": "composed",
+            "phase": "pre",
+            "when": {"type": "semantic"},
+            "then": "shared_response",
+        }
+    )
+
+    assert rule.then == ["shared_response"]
