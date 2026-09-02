@@ -37,6 +37,57 @@ class CodexService(Summarizer):
             return None
         return round(count / (duration_ns / 1_000_000_000), 2)
 
+    @staticmethod
+    def _nullable_enum(values: list[str]) -> dict[str, Any]:
+        if not values:
+            return {"type": "null"}
+        return {
+            "anyOf": [
+                {"type": "string", "enum": values},
+                {"type": "null"},
+            ]
+        }
+
+    @classmethod
+    def _decision_schema(
+        cls,
+        valid_rule_ids: list[str],
+        valid_agent_names: list[str],
+    ) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "matched_rule": cls._nullable_enum(valid_rule_ids),
+                "rule_confidence": {
+                    "anyOf": [
+                        {"type": "number", "minimum": 0, "maximum": 1},
+                        {"type": "null"},
+                    ]
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["answered", "not_found", "insufficient_information"],
+                },
+                "answer": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "null"},
+                    ]
+                },
+                "suggested_agent": cls._nullable_enum(valid_agent_names),
+                "suggested_agent_args": {"type": "object"},
+            },
+            "required": [
+                "matched_rule",
+                "rule_confidence",
+                "status",
+                "answer",
+                "suggested_agent",
+                "suggested_agent_args",
+            ],
+            "additionalProperties": False,
+        }
+
     async def complete(
         self,
         prompt: str,
@@ -111,23 +162,26 @@ class CodexService(Summarizer):
 
     async def _complete_assistant_decision(
         self,
-        prompt: str,
+        system_prompt: str,
+        user_prompt: str,
+        valid_rule_ids: list[str],
+        valid_agent_names: list[str],
         thread_id: str | None,
         emit: FlowEmitter | None,
     ) -> CodexResult:
-        """Fast path using Ollama native API with an actual `think=false` request field."""
+        """Fast deterministic path using Ollama native API with real `think=false`."""
+        combined_prompt = f"{system_prompt}\n\n{user_prompt}".strip()
+
         if self.decision_client is None:
-            # Safe development fallback. This does not claim thinking is disabled because the
-            # Codex Responses transport cannot express Ollama's native `think=false` field.
             return await self.complete(
-                prompt,
+                combined_prompt,
                 thread_id=thread_id,
                 operation="assistant_decision",
                 emit=emit,
             )
 
         model = self.decision_client.model or self.client.model or "qwen3:8b"
-        prompt_tokens_estimated = self._estimate_tokens(prompt)
+        prompt_tokens_estimated = self._estimate_tokens(combined_prompt)
         await emit_flow(
             emit,
             "model.request.started",
@@ -136,8 +190,11 @@ class CodexService(Summarizer):
             model=model,
             thinking_mode="disabled",
             thinking_control="native_think_false",
+            prompt_layout="system_user",
+            structured_output="json_schema",
+            temperature=0,
             thread_reused=bool(thread_id),
-            prompt_chars=len(prompt),
+            prompt_chars=len(combined_prompt),
             prompt_tokens_estimated=prompt_tokens_estimated,
             estimated_tokens=prompt_tokens_estimated,
             timing_scope="ollama_native_api",
@@ -146,9 +203,12 @@ class CodexService(Summarizer):
         started_at = perf_counter()
         try:
             native = await self.decision_client.chat_json(
-                prompt,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                format_schema=self._decision_schema(valid_rule_ids, valid_agent_names),
                 model=model,
                 think=False,
+                temperature=0.0,
             )
         except Exception as exc:
             elapsed_ms = round((perf_counter() - started_at) * 1000, 1)
@@ -160,6 +220,9 @@ class CodexService(Summarizer):
                 model=model,
                 thinking_mode="disabled",
                 thinking_control="native_think_false",
+                prompt_layout="system_user",
+                structured_output="json_schema",
+                temperature=0,
                 elapsed_ms=elapsed_ms,
                 elapsed_seconds=round(elapsed_ms / 1000, 3),
                 timing_scope="ollama_native_api",
@@ -179,8 +242,16 @@ class CodexService(Summarizer):
         output_tok_s = self._tokens_per_second(native.eval_count, native.eval_duration_ns)
         output_tokens_estimated = self._estimate_tokens(native.text)
 
-        prompt_count_label = native.prompt_eval_count if native.prompt_eval_count is not None else f"≈{prompt_tokens_estimated}"
-        output_count_label = native.eval_count if native.eval_count is not None else f"≈{output_tokens_estimated}"
+        prompt_count_label = (
+            native.prompt_eval_count
+            if native.prompt_eval_count is not None
+            else f"≈{prompt_tokens_estimated}"
+        )
+        output_count_label = (
+            native.eval_count
+            if native.eval_count is not None
+            else f"≈{output_tokens_estimated}"
+        )
         prompt_speed_label = f" @ {prompt_tok_s:.1f} tok/s" if prompt_tok_s is not None else ""
         output_speed_label = f" @ {output_tok_s:.1f} tok/s" if output_tok_s is not None else ""
         displayed_total = total_s if total_s is not None else wall_elapsed_ms / 1000
@@ -193,8 +264,11 @@ class CodexService(Summarizer):
             model=model,
             thinking_mode="disabled",
             thinking_control="native_think_false",
+            prompt_layout="system_user",
+            structured_output="json_schema",
+            temperature=0,
             thread_id=thread_id,
-            prompt_chars=len(prompt),
+            prompt_chars=len(combined_prompt),
             output_chars=len(native.text),
             prompt_tokens_estimated=prompt_tokens_estimated,
             output_tokens_estimated=output_tokens_estimated,
@@ -214,7 +288,8 @@ class CodexService(Summarizer):
             status=(
                 f"{model} · {displayed_total:.1f} s · "
                 f"prompt={prompt_count_label} tok{prompt_speed_label} · "
-                f"output={output_count_label} tok{output_speed_label} · think:false"
+                f"output={output_count_label} tok{output_speed_label} · "
+                "think:false · schema"
             ),
             estimated_tokens=(native.prompt_eval_count or prompt_tokens_estimated),
         )
@@ -263,55 +338,56 @@ MESSAGES TO COMPACT:
             for rule in rules
         ]
         valid_rule_ids = [str(rule["id"]) for rule in compact_rules]
+        valid_agent_names = [
+            str(agent.get("name") or agent.get("id") or "").strip()
+            for agent in agents
+            if str(agent.get("name") or agent.get("id") or "").strip()
+        ]
 
-        prompt = f"""
-You are the local reasoning engine behind a WebSocket assistant.
-Perform rule classification AND answer reasoning in this single pass.
+        system_prompt = f"""
+You are the deterministic decision engine behind a WebSocket assistant.
+Perform semantic functional-rule classification AND answer reasoning in one pass.
 
-TASK 1 — FUNCTIONAL RULES
-Classify only the LATEST USER MESSAGE against the semantic functional rules below.
-Rules describe meanings, not literal phrases. Select the single highest-priority rule whose
-meaning clearly applies. Otherwise matched_rule must be null.
+RULE CLASSIFICATION IS FIRST AND MANDATORY:
+1. Read the latest user message for meaning, not literal keywords.
+2. Compare it with every semantic pre-rule.
+3. If satisfying the user necessarily requires the kind of computation or operation described
+   by a rule, that rule applies even when the user phrases the request as an ordinary factual
+   question instead of using explicit operators or words such as calculate/compute.
+4. Select the single highest-priority applicable rule. Otherwise matched_rule is null.
 
-When a selected rule has then.type = "respond":
-- status MUST be "answered".
+WHEN A RULE MATCHES:
+- rule_confidence should reflect semantic confidence from 0 to 1.
+- If then.type = "respond", status MUST be "answered".
 - If reformulate=false, answer MUST equal canonical_answer exactly.
-- If reformulate=true, naturally rephrase canonical_answer for the user, but add no new facts.
+- If reformulate=true, naturally rephrase canonical_answer without adding facts.
 - Do not suggest an agent unless the selected rule explicitly requires one.
 
-TASK 2 — NORMAL ANSWER
-If no pre-rule applies, answer using the available context. If the context is insufficient,
-do not invent an answer. You may suggest one available code-defined agent, but DO NOT claim
-it has executed.
-
-Return exactly ONE JSON object and nothing else with this shape:
-{{
-  "matched_rule": string | null,
-  "rule_confidence": number | null,
-  "status": "answered" | "not_found" | "insufficient_information",
-  "answer": string | null,
-  "suggested_agent": string | null,
-  "suggested_agent_args": object
-}}
-
-VALID RULE IDS:
-{json.dumps(valid_rule_ids, ensure_ascii=False)}
+WHEN NO RULE MATCHES:
+- Answer from the supplied conversation context when possible.
+- If reliable information is insufficient, use not_found or insufficient_information.
+- You may suggest at most one available code-defined agent, but never claim it executed.
 
 SEMANTIC PRE-RULES:
 {json.dumps(compact_rules, ensure_ascii=False)}
 
 AVAILABLE CODE AGENTS:
 {json.dumps(agents, ensure_ascii=False)}
+""".strip()
 
-CONTEXT:
-{rendered_context}
+        user_prompt = f"""
+CONVERSATION CONTEXT:
+{rendered_context or '(none)'}
 
 LATEST USER MESSAGE:
 {user_message}
 """.strip()
 
         result = await self._complete_assistant_decision(
-            prompt,
+            system_prompt,
+            user_prompt,
+            valid_rule_ids,
+            valid_agent_names,
             thread_id=thread_id,
             emit=emit,
         )
@@ -325,6 +401,9 @@ LATEST USER MESSAGE:
             parse_mode=payload.get("parse_mode"),
             thinking_mode="disabled",
             thinking_control="native_think_false" if self.decision_client else "uncontrolled",
+            prompt_layout="system_user",
+            structured_output="json_schema" if self.decision_client else "prompt_only",
+            temperature=0 if self.decision_client else None,
         )
         return payload
 
