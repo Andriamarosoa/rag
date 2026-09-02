@@ -52,6 +52,71 @@ class Orchestrator:
                 overrides[key] = value
         return overrides
 
+    @staticmethod
+    def _append_rule_output(
+        result: dict[str, Any],
+        *,
+        content: str,
+        rule_id: str,
+        origin_rule_id: str,
+        source: str,
+    ) -> None:
+        text = str(content or "").strip()
+        if not text:
+            return
+        outputs = result.setdefault("_rule_outputs", [])
+        if not isinstance(outputs, list):
+            outputs = []
+            result["_rule_outputs"] = outputs
+        outputs.append(
+            {
+                "rule_id": rule_id,
+                "origin_rule_id": origin_rule_id,
+                "source": source,
+                "content": text,
+            }
+        )
+
+    @staticmethod
+    def _compose_rule_outputs(result: dict[str, Any]) -> list[dict[str, Any]]:
+        raw_outputs = result.get("_rule_outputs")
+        if not isinstance(raw_outputs, list):
+            result["rule_outputs"] = []
+            result.pop("_rule_outputs", None)
+            return []
+
+        outputs: list[dict[str, Any]] = []
+        parts: list[str] = []
+        seen_text: set[str] = set()
+
+        for item in raw_outputs:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("content") or "").strip()
+            if not text:
+                continue
+            dedupe_key = " ".join(text.split()).casefold()
+            if dedupe_key in seen_text:
+                continue
+            seen_text.add(dedupe_key)
+            normalized = {
+                "rule_id": str(item.get("rule_id") or ""),
+                "origin_rule_id": str(item.get("origin_rule_id") or ""),
+                "source": str(item.get("source") or ""),
+                "content": text,
+            }
+            outputs.append(normalized)
+            parts.append(text)
+
+        result["rule_outputs"] = outputs
+        result.pop("_rule_outputs", None)
+
+        if parts:
+            result["answer"] = "\n\n".join(parts)
+            result["status"] = "answered"
+
+        return outputs
+
     async def _execute_reference(
         self,
         rule_id: str,
@@ -182,42 +247,31 @@ class Orchestrator:
         )
 
         if action_type == "respond":
-            # During a multi-pre-rule batch, the first response encountered belongs to the
-            # highest-priority rule capable of responding. Lower-priority rules still run,
-            # but their respond actions cannot overwrite that authoritative response.
-            if result.get("_pre_rule_batch_active"):
-                response_owner = result.get("_pre_response_owner")
-                if response_owner and response_owner != origin_rule_id:
-                    await emit_flow(
-                        emit,
-                        "rule.action.skipped",
-                        rule_id=rule.id,
-                        origin_rule_id=origin_rule_id,
-                        action_type="respond",
-                        action_index=action_index,
-                        action_count=action_count,
-                        reason="higher_priority_response_already_selected",
-                        response_owner_rule_id=response_owner,
-                    )
-                    return True
-
             canonical = str(action.get("canonical_answer", ""))
             reformulate = bool(action.get("reformulate", False))
-            if reformulate and allow_model_reformulation and result.get("answer"):
-                answer = str(result["answer"]).strip()
+            model_answer = str(result.get("_model_answer") or "").strip()
+            pre_rule_count = int(result.get("_pre_rule_batch_count") or 0)
+
+            if (
+                reformulate
+                and allow_model_reformulation
+                and pre_rule_count <= 1
+                and model_answer
+            ):
+                answer = model_answer
             else:
                 answer = canonical
 
-            result.update(
-                {
-                    "status": "answered",
-                    "answer": answer,
-                }
+            self._append_rule_output(
+                result,
+                content=answer,
+                rule_id=rule.id,
+                origin_rule_id=origin_rule_id,
+                source=source,
             )
+            result["status"] = "answered"
             if not result.get("matched_rule"):
                 result["matched_rule"] = origin_rule_id
-            if result.get("_pre_rule_batch_active") and not result.get("_pre_response_owner"):
-                result["_pre_response_owner"] = origin_rule_id
 
             await emit_flow(
                 emit,
@@ -227,8 +281,9 @@ class Orchestrator:
                 action_type="respond",
                 action_index=action_index,
                 action_count=action_count,
-                status="answered",
+                status="buffered",
                 reformulate=reformulate,
+                aggregated_response=True,
                 second_model_call=False,
             )
             return True
@@ -645,6 +700,8 @@ class Orchestrator:
             thread_id=refreshed_chat.codex_thread_id if refreshed_chat else None,
             emit=emit,
         )
+        result["_model_answer"] = result.get("answer")
+        result["_rule_outputs"] = []
 
         rule_decision_elapsed_ms = round((perf_counter() - rule_decision_started_at) * 1000, 1)
         proposed_matches = result.get("matched_rules")
@@ -708,8 +765,7 @@ class Orchestrator:
             result["matched_rules"] = accepted_matches
             result["matched_rule"] = pre_rules[0].id
             result["rule_confidence"] = accepted_matches[0]["confidence"]
-            result["_pre_rule_batch_active"] = True
-            result.pop("_pre_response_owner", None)
+            result["_pre_rule_batch_count"] = len(pre_rules)
 
             for rule_index, pre_rule in enumerate(pre_rules):
                 await emit_flow(
@@ -736,9 +792,6 @@ class Orchestrator:
                     rule_count=len(pre_rules),
                     priority=pre_rule.priority,
                 )
-
-            result.pop("_pre_rule_batch_active", None)
-            result.pop("_pre_response_owner", None)
         else:
             result.setdefault("matched_rules", [])
             result.setdefault("actions", [])
@@ -805,6 +858,18 @@ class Orchestrator:
                 origin_rule_id=rule.id,
             )
 
+        rule_outputs = self._compose_rule_outputs(result)
+        if rule_outputs:
+            await emit_flow(
+                emit,
+                "response.rules.composed",
+                output_count=len(rule_outputs),
+                rule_ids=[item["origin_rule_id"] for item in rule_outputs],
+                chars=len(str(result.get("answer") or "")),
+                separator="blank_line",
+                deduplicated=True,
+            )
+
         answer = result.get("answer")
         if not answer and result.get("status") in {"not_found", "insufficient_information"}:
             answer = "I do not have enough reliable information to answer this question."
@@ -814,6 +879,9 @@ class Orchestrator:
                 "response.fallback.applied",
                 reason=result.get("status"),
             )
+
+        result.pop("_model_answer", None)
+        result.pop("_pre_rule_batch_count", None)
 
         matched_rule_ids = [
             item.get("rule_id")
@@ -829,6 +897,14 @@ class Orchestrator:
                     "status": result.get("status"),
                     "matched_rule": result.get("matched_rule"),
                     "matched_rules": matched_rule_ids,
+                    "rule_outputs": [
+                        {
+                            "rule_id": item.get("origin_rule_id"),
+                            "source": item.get("source"),
+                        }
+                        for item in result.get("rule_outputs", [])
+                        if isinstance(item, dict)
+                    ],
                 },
             )
         )
@@ -852,5 +928,6 @@ class Orchestrator:
             matched_rule=result.get("matched_rule"),
             matched_rules=matched_rule_ids,
             matched_rule_count=len(matched_rule_ids),
+            rule_output_count=len(result.get("rule_outputs") or []),
         )
         return result
