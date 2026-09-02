@@ -67,19 +67,37 @@ class OllamaNativeClient:
 
     async def chat_json(
         self,
-        prompt: str,
+        prompt: str | None = None,
         *,
+        system_prompt: str | None = None,
+        user_prompt: str | None = None,
+        format_schema: dict[str, Any] | None = None,
         model: str | None = None,
         think: bool = False,
+        temperature: float = 0.0,
     ) -> OllamaNativeResult:
+        """Call Ollama `/api/chat` with deterministic structured output.
+
+        `prompt` is kept for backwards compatibility. For decision routing, callers should
+        prefer separate system/user messages so functional rules cannot be confused with the
+        user's content.
+        """
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+
+        effective_user_prompt = user_prompt if user_prompt is not None else (prompt or "")
+        messages.append({"role": "user", "content": effective_user_prompt})
+
         response = await self._client.post(
             "/api/chat",
             json={
                 "model": model or self.model,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": messages,
                 "think": think,
                 "stream": False,
-                "format": "json",
+                "format": format_schema or "json",
+                "options": {"temperature": temperature},
             },
         )
         response.raise_for_status()
