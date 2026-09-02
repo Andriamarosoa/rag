@@ -229,3 +229,46 @@ def test_rule_response_composer_deduplicates_identical_fragments():
 
     assert result["answer"] == "Same text"
     assert len(outputs) == 1
+
+
+async def test_suggest_agent_post_message_is_appended_after_answer_without_changing_status():
+    rule = FunctionalRule.model_validate(
+        {
+            "id": "email_fallback",
+            "phase": "post",
+            "then": {
+                "type": "suggest_agent",
+                "agent": "send_email",
+                "label": "Send an email",
+                "post-message": "you can click to this link to",
+                "requires_confirmation": True,
+            },
+        }
+    )
+    orchestrator = make_orchestrator([rule])
+    result = {
+        "status": "insufficient_information",
+        "answer": "The requested information is not available.",
+        "actions": [],
+        "_rule_outputs": [],
+    }
+
+    assert await orchestrator._apply_rule_actions(
+        rule,
+        result,
+        None,
+        source="post_rule",
+        allow_model_reformulation=False,
+    )
+
+    orchestrator._compose_rule_outputs(result)
+    post_messages = orchestrator._compose_post_messages(result)
+
+    assert result["status"] == "insufficient_information"
+    assert result["answer"] == (
+        "The requested information is not available.\n\n"
+        "you can click to this link to"
+    )
+    assert post_messages == ["you can click to this link to"]
+    assert result["actions"][0]["agent"] == "send_email"
+    assert result["actions"][0]["post-message"] == "you can click to this link to"
