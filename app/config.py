@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     codex_sandbox: str = "read-only"
     codex_approval_policy: str = "never"
 
+    # Native Ollama is used for the fast integrated assistant decision so we can
+    # enforce real `think=false` and collect Ollama's native timing metrics.
+    ollama_base_url: str = "http://100.89.128.87:11434"
+    ollama_model: str = "qwen3:8b"
+
     smtp_host: str = "smtp.example.com"
     smtp_port: int = 587
     smtp_username: str = ""
