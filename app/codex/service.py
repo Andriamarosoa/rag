@@ -27,6 +27,7 @@ class CodexService(Summarizer):
         thread_id: str | None = None,
         *,
         operation: str = "complete",
+        thinking_mode: str | None = None,
         emit: FlowEmitter | None = None,
     ) -> CodexResult:
         prompt_tokens_estimated = self._estimate_tokens(prompt)
@@ -36,6 +37,7 @@ class CodexService(Summarizer):
             provider="codex_ollama",
             operation=operation,
             model=self.client.model or None,
+            thinking_mode=thinking_mode,
             thread_reused=bool(thread_id),
             prompt_chars=len(prompt),
             prompt_tokens_estimated=prompt_tokens_estimated,
@@ -54,6 +56,7 @@ class CodexService(Summarizer):
                 provider="codex_ollama",
                 operation=operation,
                 model=self.client.model or None,
+                thinking_mode=thinking_mode,
                 elapsed_ms=elapsed_ms,
                 elapsed_seconds=round(elapsed_ms / 1000, 3),
                 timing_scope="codex_to_ollama_round_trip",
@@ -69,6 +72,7 @@ class CodexService(Summarizer):
             provider="codex_ollama",
             operation=operation,
             model=self.client.model or None,
+            thinking_mode=thinking_mode,
             thread_id=result.thread_id,
             prompt_chars=len(prompt),
             output_chars=len(result.text),
@@ -79,12 +83,10 @@ class CodexService(Summarizer):
             timing_scope="codex_to_ollama_round_trip",
             metrics_source="application_wall_clock",
             native_ollama_eval_metrics_available=False,
-            # Existing UI already renders `status` and `estimated_tokens`. Keep a concise
-            # human-readable diagnostic there while the structured fields remain available
-            # to Developer/raw-event consumers.
             status=(
                 f"{self.client.model or 'model'} · {elapsed_ms / 1000:.1f} s · "
                 f"prompt≈{prompt_tokens_estimated} tok · output≈{output_tokens_estimated} tok"
+                + (f" · {thinking_mode}" if thinking_mode else "")
             ),
             estimated_tokens=prompt_tokens_estimated,
         )
@@ -178,12 +180,15 @@ CONTEXT:
 
 LATEST USER MESSAGE:
 {user_message}
+
+/no_think
 """.strip()
 
         result = await self.complete(
             prompt,
             thread_id=thread_id,
             operation="assistant_decision",
+            thinking_mode="no_think",
             emit=emit,
         )
         payload = self._parse_assistant_decision(result.text, valid_rule_ids)
@@ -194,6 +199,7 @@ LATEST USER MESSAGE:
             rule_id=payload.get("matched_rule"),
             confidence=payload.get("rule_confidence"),
             parse_mode=payload.get("parse_mode"),
+            thinking_mode="no_think",
         )
         return payload
 
@@ -256,9 +262,6 @@ LATEST USER MESSAGE:
                 "parse_mode": parse_mode,
             }
 
-        # Small local models occasionally ignore the requested combined JSON and return only
-        # the rule decision. Preserve that useful classification; the backend can still enforce
-        # the canonical rule response without a second model call.
         rule_decision = cls._parse_rule_decision(raw, valid_rule_ids)
         matched_rule = rule_decision.get("rule_id")
         return {
