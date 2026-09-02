@@ -182,6 +182,25 @@ class Orchestrator:
         )
 
         if action_type == "respond":
+            # During a multi-pre-rule batch, the first response encountered belongs to the
+            # highest-priority rule capable of responding. Lower-priority rules still run,
+            # but their respond actions cannot overwrite that authoritative response.
+            if result.get("_pre_rule_batch_active"):
+                response_owner = result.get("_pre_response_owner")
+                if response_owner and response_owner != origin_rule_id:
+                    await emit_flow(
+                        emit,
+                        "rule.action.skipped",
+                        rule_id=rule.id,
+                        origin_rule_id=origin_rule_id,
+                        action_type="respond",
+                        action_index=action_index,
+                        action_count=action_count,
+                        reason="higher_priority_response_already_selected",
+                        response_owner_rule_id=response_owner,
+                    )
+                    return True
+
             canonical = str(action.get("canonical_answer", ""))
             reformulate = bool(action.get("reformulate", False))
             if reformulate and allow_model_reformulation and result.get("answer"):
@@ -193,9 +212,13 @@ class Orchestrator:
                 {
                     "status": "answered",
                     "answer": answer,
-                    "matched_rule": origin_rule_id,
                 }
             )
+            if not result.get("matched_rule"):
+                result["matched_rule"] = origin_rule_id
+            if result.get("_pre_rule_batch_active") and not result.get("_pre_response_owner"):
+                result["_pre_response_owner"] = origin_rule_id
+
             await emit_flow(
                 emit,
                 "rule.action.completed",
@@ -600,6 +623,7 @@ class Orchestrator:
             "rules.pre.started",
             candidate_count=len(semantic_rules),
             integrated_with_reasoning=True,
+            multiple_matches_allowed=True,
             timing_scope="integrated_assistant_decision",
         )
 
@@ -610,6 +634,7 @@ class Orchestrator:
             available_agent_count=len(self.agents.specs()),
             semantic_rule_count=len(semantic_rules),
             integrated_rule_matching=True,
+            multiple_rule_matches=True,
         )
 
         result = await self.codex.answer_with_rules(
@@ -622,17 +647,27 @@ class Orchestrator:
         )
 
         rule_decision_elapsed_ms = round((perf_counter() - rule_decision_started_at) * 1000, 1)
-        proposed_rule_id = result.get("matched_rule")
-        pre_rule = await self.rules.resolve_pre_decision(
+        proposed_matches = result.get("matched_rules")
+        if not isinstance(proposed_matches, list):
+            proposed_matches = []
+        proposed_rule_ids = [
+            str(item.get("rule_id") or "")
+            for item in proposed_matches
+            if isinstance(item, dict) and item.get("rule_id")
+        ]
+
+        pre_rules = await self.rules.resolve_pre_decisions(
             result,
             emit=emit,
             decision_elapsed_ms=rule_decision_elapsed_ms,
         )
 
-        if proposed_rule_id and pre_rule is None:
+        if proposed_rule_ids and not pre_rules:
             result.update(
                 {
+                    "matched_rules": [],
                     "matched_rule": None,
+                    "rule_confidence": None,
                     "status": "insufficient_information",
                     "answer": None,
                     "suggested_agent": None,
@@ -643,8 +678,8 @@ class Orchestrator:
             await emit_flow(
                 emit,
                 "reasoning.rule_answer.discarded",
-                proposed_rule_id=proposed_rule_id,
-                reason="rule_not_accepted",
+                proposed_rule_ids=proposed_rule_ids,
+                reason="all_proposed_rules_rejected",
             )
 
         if result.get("thread_id") and result.get("thread_id") != chat.codex_thread_id:
@@ -656,20 +691,56 @@ class Orchestrator:
                 thread_id=result["thread_id"],
             )
 
-        if pre_rule:
+        if pre_rules:
+            confidence_by_id = {
+                str(item.get("rule_id") or ""): item.get("confidence")
+                for item in proposed_matches
+                if isinstance(item, dict)
+            }
+            accepted_matches = [
+                {"rule_id": rule.id, "confidence": confidence_by_id.get(rule.id)}
+                for rule in pre_rules
+            ]
+
             result["actions"] = []
             result["suggested_agent"] = None
             result["suggested_agent_args"] = {}
-            result["matched_rule"] = pre_rule.id
-            await self._apply_rule_actions(
-                pre_rule,
-                result,
-                emit,
-                source="pre_rule",
-                allow_model_reformulation=True,
-                origin_rule_id=pre_rule.id,
-            )
+            result["matched_rules"] = accepted_matches
+            result["matched_rule"] = pre_rules[0].id
+            result["rule_confidence"] = accepted_matches[0]["confidence"]
+            result["_pre_rule_batch_active"] = True
+            result.pop("_pre_response_owner", None)
+
+            for rule_index, pre_rule in enumerate(pre_rules):
+                await emit_flow(
+                    emit,
+                    "rules.pre.execution.started",
+                    rule_id=pre_rule.id,
+                    rule_index=rule_index,
+                    rule_count=len(pre_rules),
+                    priority=pre_rule.priority,
+                )
+                success = await self._apply_rule_actions(
+                    pre_rule,
+                    result,
+                    emit,
+                    source="pre_rule",
+                    allow_model_reformulation=True,
+                    origin_rule_id=pre_rule.id,
+                )
+                await emit_flow(
+                    emit,
+                    "rules.pre.execution.completed" if success else "rules.pre.execution.failed",
+                    rule_id=pre_rule.id,
+                    rule_index=rule_index,
+                    rule_count=len(pre_rules),
+                    priority=pre_rule.priority,
+                )
+
+            result.pop("_pre_rule_batch_active", None)
+            result.pop("_pre_response_owner", None)
         else:
+            result.setdefault("matched_rules", [])
             result.setdefault("actions", [])
             suggested = result.get("suggested_agent")
             if suggested and self.agents.get(suggested):
@@ -696,6 +767,12 @@ class Orchestrator:
             "reasoning.completed",
             status=result.get("status"),
             matched_rule=result.get("matched_rule"),
+            matched_rules=[
+                item.get("rule_id")
+                for item in result.get("matched_rules", [])
+                if isinstance(item, dict)
+            ],
+            matched_rule_count=len(result.get("matched_rules") or []),
             suggested_agent=result.get("suggested_agent"),
             integrated_rule_matching=True,
         )
@@ -738,12 +815,21 @@ class Orchestrator:
                 reason=result.get("status"),
             )
 
+        matched_rule_ids = [
+            item.get("rule_id")
+            for item in result.get("matched_rules", [])
+            if isinstance(item, dict)
+        ]
         await self.store.append_message(
             ChatMessage(
                 chat_id=chat.id,
                 role="assistant",
                 content=str(answer or ""),
-                metadata={"status": result.get("status"), "matched_rule": result.get("matched_rule")},
+                metadata={
+                    "status": result.get("status"),
+                    "matched_rule": result.get("matched_rule"),
+                    "matched_rules": matched_rule_ids,
+                },
             )
         )
         await emit_flow(
@@ -764,5 +850,7 @@ class Orchestrator:
             status=result.get("status"),
             action_count=len(result.get("actions") or []),
             matched_rule=result.get("matched_rule"),
+            matched_rules=matched_rule_ids,
+            matched_rule_count=len(matched_rule_ids),
         )
         return result
