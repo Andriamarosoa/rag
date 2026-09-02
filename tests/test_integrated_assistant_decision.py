@@ -21,19 +21,27 @@ class FakeDecisionClient:
         self.model = "qwen3:8b"
         self.response = response
         self.calls = 0
-        self.last_prompt = ""
+        self.last_system_prompt = ""
+        self.last_user_prompt = ""
         self.last_think: bool | None = None
+        self.last_schema: dict | None = None
 
     async def chat_json(
         self,
-        prompt: str,
+        prompt: str | None = None,
         *,
+        system_prompt: str | None = None,
+        user_prompt: str | None = None,
+        format_schema: dict | None = None,
         model: str | None = None,
         think: bool = False,
+        temperature: float = 0.0,
     ) -> OllamaNativeResult:
         self.calls += 1
-        self.last_prompt = prompt
+        self.last_system_prompt = system_prompt or ""
+        self.last_user_prompt = user_prompt if user_prompt is not None else (prompt or "")
         self.last_think = think
+        self.last_schema = format_schema
         return OllamaNativeResult(
             text=json.dumps(self.response),
             raw={
@@ -51,8 +59,9 @@ def test_rules_and_reasoning_use_one_native_no_think_model_call():
     codex_client = FakeCodexClient()
     decision_client = FakeDecisionClient(
         {
-            "matched_rule": "math_calculation",
-            "rule_confidence": 0.99,
+            "matched_rules": [
+                {"rule_id": "math_calculation", "confidence": 0.99},
+            ],
             "status": "answered",
             "answer": "hahahaha",
             "suggested_agent": None,
@@ -75,11 +84,13 @@ def test_rules_and_reasoning_use_one_native_no_think_model_call():
                     "priority": 200,
                     "description": "Any mathematical calculation.",
                     "when": {"type": "semantic"},
-                    "then": {
-                        "type": "respond",
-                        "canonical_answer": "hahahaha",
-                        "reformulate": False,
-                    },
+                    "then": [
+                        {
+                            "type": "respond",
+                            "canonical_answer": "hahahaha",
+                            "reformulate": False,
+                        }
+                    ],
                 }
             ],
             agents=[],
@@ -91,10 +102,16 @@ def test_rules_and_reasoning_use_one_native_no_think_model_call():
     assert decision_client.calls == 1
     assert codex_client.calls == 0
     assert decision_client.last_think is False
-    assert "/no_think" not in decision_client.last_prompt
+    assert "/no_think" not in decision_client.last_system_prompt
+    assert result["matched_rules"] == [
+        {"rule_id": "math_calculation", "confidence": 0.99}
+    ]
     assert result["matched_rule"] == "math_calculation"
     assert result["rule_confidence"] == 0.99
     assert result["answer"] == "hahahaha"
+
+    assert decision_client.last_schema is not None
+    assert "matched_rules" in decision_client.last_schema["properties"]
 
     started = next(data for event, data in events if event == "model.request.started")
     completed = next(data for event, data in events if event == "model.request.completed")
@@ -120,8 +137,7 @@ def test_combined_parser_keeps_normal_answer_without_rule():
     result = CodexService._parse_assistant_decision(
         json.dumps(
             {
-                "matched_rule": None,
-                "rule_confidence": 0.93,
+                "matched_rules": [],
                 "status": "answered",
                 "answer": "A normal answer",
                 "suggested_agent": None,
@@ -131,7 +147,54 @@ def test_combined_parser_keeps_normal_answer_without_rule():
         ["math_calculation", "password_reset"],
     )
 
+    assert result["matched_rules"] == []
     assert result["matched_rule"] is None
     assert result["status"] == "answered"
     assert result["answer"] == "A normal answer"
     assert result["parse_mode"] == "json"
+
+
+def test_combined_parser_keeps_multiple_valid_rule_matches():
+    result = CodexService._parse_assistant_decision(
+        json.dumps(
+            {
+                "matched_rules": [
+                    {"rule_id": "math_calculation", "confidence": 0.96},
+                    {"rule_id": "password_reset", "confidence": 0.88},
+                ],
+                "status": "answered",
+                "answer": "model wording",
+                "suggested_agent": None,
+                "suggested_agent_args": {},
+            }
+        ),
+        ["math_calculation", "password_reset"],
+    )
+
+    assert result["matched_rules"] == [
+        {"rule_id": "math_calculation", "confidence": 0.96},
+        {"rule_id": "password_reset", "confidence": 0.88},
+    ]
+    assert result["matched_rule"] == "math_calculation"
+    assert result["rule_confidence"] == 0.96
+
+
+def test_combined_parser_accepts_legacy_single_rule_json():
+    result = CodexService._parse_assistant_decision(
+        json.dumps(
+            {
+                "matched_rule": "password_reset",
+                "rule_confidence": 0.91,
+                "status": "answered",
+                "answer": "legacy",
+                "suggested_agent": None,
+                "suggested_agent_args": {},
+            }
+        ),
+        ["password_reset"],
+    )
+
+    assert result["matched_rules"] == [
+        {"rule_id": "password_reset", "confidence": 0.91}
+    ]
+    assert result["parse_mode"] == "json_legacy_single_rule"
