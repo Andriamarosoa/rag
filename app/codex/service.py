@@ -4,6 +4,7 @@ import json
 import re
 
 from app.context.manager import Summarizer
+from app.flow.events import FlowEmitter, emit_flow
 from app.sessions.models import ChatMessage
 
 from .client import CodexMcpClient, CodexResult
@@ -13,10 +14,49 @@ class CodexService(Summarizer):
     def __init__(self, client: CodexMcpClient):
         self.client = client
 
-    async def complete(self, prompt: str, thread_id: str | None = None) -> CodexResult:
-        return await self.client.ask(prompt, thread_id=thread_id)
+    async def complete(
+        self,
+        prompt: str,
+        thread_id: str | None = None,
+        *,
+        operation: str = "complete",
+        emit: FlowEmitter | None = None,
+    ) -> CodexResult:
+        await emit_flow(
+            emit,
+            "model.request.started",
+            provider="codex",
+            operation=operation,
+            thread_reused=bool(thread_id),
+            prompt_chars=len(prompt),
+        )
+        try:
+            result = await self.client.ask(prompt, thread_id=thread_id)
+        except Exception as exc:
+            await emit_flow(
+                emit,
+                "model.request.failed",
+                provider="codex",
+                operation=operation,
+                error=type(exc).__name__,
+            )
+            raise
+        await emit_flow(
+            emit,
+            "model.request.completed",
+            provider="codex",
+            operation=operation,
+            thread_id=result.thread_id,
+            output_chars=len(result.text),
+        )
+        return result
 
-    async def summarize_context(self, previous_summary: str, messages: list[ChatMessage]) -> str:
+    async def summarize_context(
+        self,
+        previous_summary: str,
+        messages: list[ChatMessage],
+        emit: FlowEmitter | None = None,
+    ) -> str:
         transcript = "\n".join(f"{m.role.upper()}: {m.content}" for m in messages)
         prompt = f"""
 You are compacting a long-running application chat context.
@@ -30,10 +70,16 @@ PREVIOUS SUMMARY:
 MESSAGES TO COMPACT:
 {transcript}
 """.strip()
-        result = await self.complete(prompt)
+        result = await self.complete(prompt, operation="context_summarization", emit=emit)
         return result.text.strip()
 
-    async def choose_pre_rule(self, user_message: str, rendered_context: str, rules: list[dict]) -> dict:
+    async def choose_pre_rule(
+        self,
+        user_message: str,
+        rendered_context: str,
+        rules: list[dict],
+        emit: FlowEmitter | None = None,
+    ) -> dict:
         compact_rules = [
             {
                 "id": r["id"],
@@ -57,10 +103,16 @@ CONTEXT:
 LATEST USER MESSAGE:
 {user_message}
 """.strip()
-        result = await self.complete(prompt)
+        result = await self.complete(prompt, operation="pre_rule_matching", emit=emit)
         return self._json_object(result.text, {"rule_id": None, "confidence": 0.0})
 
-    async def reformulate(self, canonical_answer: str, user_message: str, rendered_context: str) -> str:
+    async def reformulate(
+        self,
+        canonical_answer: str,
+        user_message: str,
+        rendered_context: str,
+        emit: FlowEmitter | None = None,
+    ) -> str:
         prompt = f"""
 Rephrase the canonical answer naturally for the current user message.
 Do not add any fact not contained in the canonical answer.
@@ -75,9 +127,18 @@ USER MESSAGE:
 CONTEXT:
 {rendered_context}
 """.strip()
-        return (await self.complete(prompt)).text.strip()
+        return (
+            await self.complete(prompt, operation="rule_answer_reformulation", emit=emit)
+        ).text.strip()
 
-    async def answer(self, user_message: str, rendered_context: str, agents: list[dict], thread_id: str | None) -> dict:
+    async def answer(
+        self,
+        user_message: str,
+        rendered_context: str,
+        agents: list[dict],
+        thread_id: str | None,
+        emit: FlowEmitter | None = None,
+    ) -> dict:
         prompt = f"""
 You are the local reasoning engine behind a WebSocket assistant.
 Answer using the available context. If the context is insufficient, do not invent an answer.
@@ -100,7 +161,12 @@ CONTEXT:
 LATEST USER MESSAGE:
 {user_message}
 """.strip()
-        result = await self.complete(prompt, thread_id=thread_id)
+        result = await self.complete(
+            prompt,
+            thread_id=thread_id,
+            operation="assistant_reasoning",
+            emit=emit,
+        )
         payload = self._json_object(
             result.text,
             {
