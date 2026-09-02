@@ -43,8 +43,18 @@ class RuleEngine:
         for item in rule.then:
             if isinstance(item, str):
                 labels.append(f"rule:{item}")
-            elif isinstance(item, dict):
-                labels.append(str(item.get("type") or ""))
+                continue
+            if not isinstance(item, dict):
+                labels.append("invalid")
+                continue
+            if item.get("ref"):
+                labels.append(f"rule:{item['ref']}")
+            elif item.get("type"):
+                labels.append(str(item["type"]))
+            elif "then" in item:
+                labels.append("group")
+            else:
+                labels.append("unknown")
         return labels
 
     def semantic_pre_rules(self) -> list[FunctionalRule]:
