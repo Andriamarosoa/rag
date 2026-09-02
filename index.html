@@ -560,10 +560,34 @@
     return parts.join(' · ');
   }
 
+  function settleRunningStep(view,key,status='done'){
+    const step=view.steps.get(key);
+    if(step&&step.el.classList.contains('running')){
+      step.el.className=`work-step ${status}`;
+    }
+  }
+
+  function settleAllRunningSteps(view,status='done'){
+    for(const step of view.steps.values()){
+      if(step.el.classList.contains('running')){
+        step.el.className=`work-step ${status}`;
+      }
+    }
+  }
+
   function updateInlineFlow(payload){
     const id=payload.request_id;
     if(!id) return;
-    if(payload.type==='assistant.started'){ ensureFlowView(id); return; }
+
+    const view=ensureFlowView(id);
+
+    // flow.started has no paired "flow.ready" event. As soon as the backend
+    // advances to another event, preparation is complete.
+    if(payload.type!=='flow.started'){
+      settleRunningStep(view,'flow','done');
+    }
+
+    if(payload.type==='assistant.started') return;
     if(payload.type==='flow.completed'){ finishFlow(id,false); return; }
     if(payload.type==='assistant.completed') return;
     if(payload.type==='error'){ finishFlow(id,true); return; }
@@ -571,7 +595,6 @@
     const key=stepKey(payload);
     if(!key) return;
 
-    const view=ensureFlowView(id);
     let step=view.steps.get(key);
 
     if(!step){
@@ -603,6 +626,10 @@
   function finishFlow(id,failed=false){
     const view=FLOW_VIEWS.get(id);
     if(!view||view.finished) return;
+
+    // Never leave a spinner stuck after the request has completed.
+    settleAllRunningSteps(view,failed?'error':'done');
+
     view.finished=true;
     const seconds=((performance.now()-view.startedAt)/1000).toFixed(1);
     view.details.classList.add(failed?'failed':'done');
