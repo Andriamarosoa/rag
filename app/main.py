@@ -41,7 +41,7 @@ context_manager = ContextManager(
     keep_recent_tokens=settings.context_keep_recent_tokens,
     summary_target_tokens=settings.context_summary_target_tokens,
 )
-rules = RuleEngine(settings.rules_path, codex)
+rules = RuleEngine(settings.rules_path)
 agents = AgentRegistry()
 agents.register(SendEmailAgent(settings))
 manager = ConnectionManager()
