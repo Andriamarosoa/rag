@@ -27,9 +27,10 @@ COPY . /app
 RUN python3 -m venv /opt/venv \
     && pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir . \
-    && chmod +x /app/docker-entrypoint.sh
+    && sed 's/\r$//' /app/docker-entrypoint.sh > /usr/local/bin/rag-entrypoint \
+    && chmod +x /usr/local/bin/rag-entrypoint
 
 EXPOSE 8765
 
-ENTRYPOINT ["/app/docker-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/rag-entrypoint"]
 CMD ["sh", "-c", "uvicorn app.main:app --host ${APP_HOST:-0.0.0.0} --port ${APP_PORT:-8765}"]
