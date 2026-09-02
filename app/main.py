@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 from app.agents.email_agent import SendEmailAgent
 from app.agents.registry import AgentRegistry
@@ -24,6 +24,7 @@ from app.ws.router import build_router
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 INDEX_HTML = ROOT_DIR / "index.html"
+ACTION_TEMPLATE_JS = ROOT_DIR / "action-template.js"
 
 store = SessionStore(settings.database_path)
 codex_client = CodexMcpClient(
@@ -87,8 +88,17 @@ app.include_router(build_router(manager, orchestrator, agents, rules))
 
 
 @app.get("/", include_in_schema=False)
-async def test_ui() -> FileResponse:
-    return FileResponse(INDEX_HTML)
+async def test_ui() -> HTMLResponse:
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    script_tag = '<script src="/action-template.js"></script>'
+    if script_tag not in html:
+        html = html.replace("</body>", f"{script_tag}\n</body>")
+    return HTMLResponse(html)
+
+
+@app.get("/action-template.js", include_in_schema=False)
+async def action_template_script() -> FileResponse:
+    return FileResponse(ACTION_TEMPLATE_JS, media_type="application/javascript")
 
 
 @app.get("/health")
@@ -104,6 +114,7 @@ async def health() -> dict:
         "rule_classifier_context": "latest_user_segments_only",
         "segment_tracking": True,
         "strict_segment_completeness": True,
+        "action_templates": True,
         "skb_base_url": skb_client.base_url,
         "skb_module_count": len(skb_search_agent.modules),
     }
