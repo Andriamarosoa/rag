@@ -31,6 +31,10 @@ def test_rules_and_reasoning_share_one_model_call():
         }
     )
     service = CodexService(client)
+    events: list[tuple[str, dict]] = []
+
+    async def emit(event_type: str, data: dict) -> None:
+        events.append((event_type, data))
 
     result = asyncio.run(
         service.answer_with_rules(
@@ -51,6 +55,7 @@ def test_rules_and_reasoning_share_one_model_call():
             ],
             agents=[],
             thread_id=None,
+            emit=emit,
         )
     )
 
@@ -59,6 +64,20 @@ def test_rules_and_reasoning_share_one_model_call():
     assert result["rule_confidence"] == 0.99
     assert result["answer"] == "hahahaha"
     assert result["thread_id"] == "thread-1"
+
+    started = next(data for event, data in events if event == "model.request.started")
+    completed = next(data for event, data in events if event == "model.request.completed")
+
+    assert started["operation"] == "assistant_decision"
+    assert started["model"] == "qwen3:8b"
+    assert started["prompt_tokens_estimated"] > 0
+    assert started["timing_scope"] == "codex_to_ollama_round_trip"
+
+    assert completed["elapsed_ms"] >= 0
+    assert completed["prompt_tokens_estimated"] == started["prompt_tokens_estimated"]
+    assert completed["output_tokens_estimated"] > 0
+    assert completed["metrics_source"] == "application_wall_clock"
+    assert completed["native_ollama_eval_metrics_available"] is False
 
 
 def test_combined_parser_keeps_normal_answer_without_rule():
