@@ -54,15 +54,29 @@ class CodexService(Summarizer):
         valid_rule_ids: list[str],
         valid_agent_names: list[str],
     ) -> dict[str, Any]:
-        return {
+        matched_rule_item: dict[str, Any] = {
             "type": "object",
             "properties": {
-                "matched_rule": cls._nullable_enum(valid_rule_ids),
-                "rule_confidence": {
+                "rule_id": {
+                    "type": "string",
+                    "enum": valid_rule_ids,
+                },
+                "confidence": {
                     "anyOf": [
                         {"type": "number", "minimum": 0, "maximum": 1},
                         {"type": "null"},
                     ]
+                },
+            },
+            "required": ["rule_id", "confidence"],
+            "additionalProperties": False,
+        }
+        return {
+            "type": "object",
+            "properties": {
+                "matched_rules": {
+                    "type": "array",
+                    "items": matched_rule_item,
                 },
                 "status": {
                     "type": "string",
@@ -78,8 +92,7 @@ class CodexService(Summarizer):
                 "suggested_agent_args": {"type": "object"},
             },
             "required": [
-                "matched_rule",
-                "rule_confidence",
+                "matched_rules",
                 "status",
                 "answer",
                 "suggested_agent",
@@ -326,14 +339,14 @@ MESSAGES TO COMPACT:
         thread_id: str | None,
         emit: FlowEmitter | None = None,
     ) -> dict:
-        """Classify semantic rules and reason about the answer in one fast no-thinking pass."""
+        """Classify all applicable semantic rules and reason about the answer in one pass."""
         compact_rules = [
             {
                 "id": rule["id"],
                 "priority": rule.get("priority", 0),
                 "description": rule.get("description", ""),
                 "when": rule.get("when", {}),
-                "then": rule.get("then", {}),
+                "then": rule.get("then", []),
             }
             for rule in rules
         ]
@@ -350,18 +363,20 @@ Perform semantic functional-rule classification AND answer reasoning in one pass
 
 RULE CLASSIFICATION IS FIRST AND MANDATORY:
 1. Read the latest user message for meaning, not literal keywords.
-2. Compare it with every semantic pre-rule.
-3. If satisfying the user necessarily requires the kind of computation or operation described
-   by a rule, that rule applies even when the user phrases the request as an ordinary factual
-   question instead of using explicit operators or words such as calculate/compute.
-4. Select the single highest-priority applicable rule. Otherwise matched_rule is null.
+2. Compare it independently with every semantic pre-rule.
+3. A single user message MAY match zero, one, or multiple rules.
+4. Include EVERY applicable rule in matched_rules; never discard an applicable rule merely
+   because another rule has a higher priority.
+5. If satisfying the user necessarily requires the kind of computation or operation described
+   by a rule, that rule applies even when the request is phrased as an ordinary factual question.
+6. For each match return rule_id plus semantic confidence from 0 to 1.
+7. Order matched_rules by rule priority, highest first. If none apply, return an empty array.
 
-WHEN A RULE MATCHES:
-- rule_confidence should reflect semantic confidence from 0 to 1.
-- If then.type = "respond", status MUST be "answered".
-- If reformulate=false, answer MUST equal canonical_answer exactly.
-- If reformulate=true, naturally rephrase canonical_answer without adding facts.
-- Do not suggest an agent unless the selected rule explicitly requires one.
+RULE ACTIONS ARE EXECUTED LOCALLY BY FASTAPI:
+- Do not try to execute rule references, nested then/catch branches, or agents yourself.
+- The backend validates every proposed match and executes all accepted rules.
+- If multiple accepted rules can respond, backend priority decides which response is authoritative.
+- You may still produce an answer for normal reasoning or for reformulatable response rules.
 
 WHEN NO RULE MATCHES:
 - Answer from the supplied conversation context when possible.
@@ -397,6 +412,8 @@ LATEST USER MESSAGE:
             emit,
             "rules.pre.decision_parsed",
             rule_id=payload.get("matched_rule"),
+            rule_ids=[match["rule_id"] for match in payload.get("matched_rules", [])],
+            match_count=len(payload.get("matched_rules", [])),
             confidence=payload.get("rule_confidence"),
             parse_mode=payload.get("parse_mode"),
             thinking_mode="disabled",
@@ -422,25 +439,71 @@ LATEST USER MESSAGE:
         return confidence
 
     @classmethod
+    def _normalize_matched_rules(
+        cls,
+        parsed: dict[str, Any],
+        valid_rule_ids: list[str],
+    ) -> tuple[list[dict[str, Any]], str]:
+        valid = set(valid_rule_ids)
+        raw_matches = parsed.get("matched_rules")
+        parse_mode = "json"
+
+        if not isinstance(raw_matches, list):
+            legacy_rule_id = parsed.get("matched_rule", parsed.get("rule_id"))
+            if legacy_rule_id is None:
+                raw_matches = []
+            else:
+                raw_matches = [
+                    {
+                        "rule_id": legacy_rule_id,
+                        "confidence": parsed.get(
+                            "rule_confidence",
+                            parsed.get("confidence"),
+                        ),
+                    }
+                ]
+                parse_mode = "json_legacy_single_rule"
+
+        matches: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        rejected = False
+        for raw_match in raw_matches:
+            if isinstance(raw_match, str):
+                rule_id = raw_match.strip()
+                confidence = None
+            elif isinstance(raw_match, dict):
+                rule_id = str(
+                    raw_match.get("rule_id", raw_match.get("id", "")) or ""
+                ).strip()
+                confidence = cls._normalize_confidence(
+                    raw_match.get("confidence", raw_match.get("rule_confidence"))
+                )
+            else:
+                rejected = True
+                continue
+
+            if not rule_id or rule_id not in valid or rule_id in seen:
+                rejected = True
+                continue
+            seen.add(rule_id)
+            matches.append({"rule_id": rule_id, "confidence": confidence})
+
+        if rejected and parse_mode == "json":
+            parse_mode = "json_with_rejected_matches"
+        return matches, parse_mode
+
+    @classmethod
     def _parse_assistant_decision(cls, text: str, valid_rule_ids: list[str]) -> dict:
         raw = (text or "").strip()
-        valid = set(valid_rule_ids)
         parsed = cls._json_object(raw, {})
 
         if parsed:
-            rule_id = parsed.get("matched_rule", parsed.get("rule_id"))
-            if isinstance(rule_id, str):
-                rule_id = rule_id.strip()
-                if rule_id.lower() in {"null", "none", "no_match", "nomatch"}:
-                    rule_id = None
-            parse_mode = "json"
-            if rule_id is not None and rule_id not in valid:
-                rule_id = None
-                parse_mode = "json_unknown_rule"
+            matches, parse_mode = cls._normalize_matched_rules(parsed, valid_rule_ids)
+            primary = matches[0] if matches else None
 
             status = parsed.get("status")
             if status not in {"answered", "not_found", "insufficient_information"}:
-                status = "answered" if parsed.get("answer") else "insufficient_information"
+                status = "answered" if parsed.get("answer") or matches else "insufficient_information"
 
             answer = parsed.get("answer")
             if answer is not None and not isinstance(answer, str):
@@ -455,10 +518,10 @@ LATEST USER MESSAGE:
                 suggested_args = {}
 
             return {
-                "matched_rule": rule_id,
-                "rule_confidence": cls._normalize_confidence(
-                    parsed.get("rule_confidence", parsed.get("confidence"))
-                ),
+                "matched_rules": matches,
+                # Compatibility fields for existing UI/clients. The array above is canonical.
+                "matched_rule": primary["rule_id"] if primary else None,
+                "rule_confidence": primary["confidence"] if primary else None,
                 "status": status,
                 "answer": answer,
                 "suggested_agent": suggested_agent,
@@ -468,9 +531,16 @@ LATEST USER MESSAGE:
 
         rule_decision = cls._parse_rule_decision(raw, valid_rule_ids)
         matched_rule = rule_decision.get("rule_id")
+        confidence = rule_decision.get("confidence")
+        matches = (
+            [{"rule_id": matched_rule, "confidence": confidence}]
+            if matched_rule
+            else []
+        )
         return {
+            "matched_rules": matches,
             "matched_rule": matched_rule,
-            "rule_confidence": rule_decision.get("confidence"),
+            "rule_confidence": confidence,
             "status": "answered" if matched_rule else "insufficient_information",
             "answer": None,
             "suggested_agent": None,
@@ -480,7 +550,7 @@ LATEST USER MESSAGE:
 
     @classmethod
     def _parse_rule_decision(cls, text: str, valid_rule_ids: list[str]) -> dict:
-        """Parse an explicit rule-only decision used as a tolerant fallback."""
+        """Parse an explicit rule-only decision used as a tolerant legacy fallback."""
         raw = (text or "").strip()
         valid = set(valid_rule_ids)
 
