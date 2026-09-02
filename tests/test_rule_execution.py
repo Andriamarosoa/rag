@@ -110,7 +110,7 @@ async def test_nested_then_runs_after_successful_action():
         }
     )
     orchestrator = make_orchestrator([root, shared])
-    result = {"status": "not_found", "answer": None, "actions": []}
+    result = {"status": "not_found", "answer": None, "actions": [], "_rule_outputs": []}
 
     success = await orchestrator._apply_rule_actions(
         root,
@@ -119,6 +119,7 @@ async def test_nested_then_runs_after_successful_action():
         source="test",
         allow_model_reformulation=False,
     )
+    orchestrator._compose_rule_outputs(result)
 
     assert success is True
     assert result["answer"] == "hello"
@@ -141,7 +142,7 @@ async def test_catch_runs_when_referenced_rule_fails():
         }
     )
     orchestrator = make_orchestrator([root])
-    result = {"status": "not_found", "answer": None, "actions": []}
+    result = {"status": "not_found", "answer": None, "actions": [], "_rule_outputs": []}
 
     success = await orchestrator._apply_rule_actions(
         root,
@@ -150,13 +151,14 @@ async def test_catch_runs_when_referenced_rule_fails():
         source="test",
         allow_model_reformulation=False,
     )
+    orchestrator._compose_rule_outputs(result)
 
     assert success is True
     assert result["answer"] == "fallback"
     assert result["matched_rule"] == "root"
 
 
-async def test_lower_priority_rule_cannot_overwrite_first_pre_rule_response():
+async def test_multiple_rule_responses_are_composed_into_one_answer():
     high = FunctionalRule.model_validate(
         {
             "id": "high",
@@ -182,9 +184,11 @@ async def test_lower_priority_rule_cannot_overwrite_first_pre_rule_response():
     result = {
         "status": "answered",
         "answer": "model answer",
+        "_model_answer": "model answer",
+        "_rule_outputs": [],
+        "_pre_rule_batch_count": 2,
         "actions": [],
         "matched_rule": "high",
-        "_pre_rule_batch_active": True,
     }
 
     assert await orchestrator._apply_rule_actions(
@@ -204,6 +208,24 @@ async def test_lower_priority_rule_cannot_overwrite_first_pre_rule_response():
         origin_rule_id="low",
     )
 
-    assert result["answer"] == "high answer"
+    outputs = orchestrator._compose_rule_outputs(result)
+
+    assert result["answer"] == "high answer\n\nlow answer"
+    assert [item["origin_rule_id"] for item in outputs] == ["high", "low"]
     assert result["matched_rule"] == "high"
     assert result["actions"][0]["agent"] == "send_email"
+
+
+def test_rule_response_composer_deduplicates_identical_fragments():
+    result = {
+        "answer": None,
+        "_rule_outputs": [
+            {"rule_id": "a", "origin_rule_id": "a", "source": "pre_rule", "content": "Same text"},
+            {"rule_id": "b", "origin_rule_id": "b", "source": "pre_rule", "content": " same   text "},
+        ],
+    }
+
+    outputs = Orchestrator._compose_rule_outputs(result)
+
+    assert result["answer"] == "Same text"
+    assert len(outputs) == 1
