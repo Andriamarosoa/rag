@@ -60,10 +60,14 @@ class RuleEngine:
             "timing_scope": "integrated_assistant_decision",
         }
         if decision_elapsed_ms is not None:
+            decision_elapsed_seconds = round(decision_elapsed_ms / 1000, 3)
             timing.update(
                 {
                     "decision_elapsed_ms": decision_elapsed_ms,
-                    "decision_elapsed_seconds": round(decision_elapsed_ms / 1000, 3),
+                    "decision_elapsed_seconds": decision_elapsed_seconds,
+                    # Compatibility with the current chat renderer, which already renders
+                    # `status`. Structured timing fields above are the canonical metrics.
+                    "status": f"durée décision: {decision_elapsed_seconds:.1f} s",
                 }
             )
 
