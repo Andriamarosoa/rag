@@ -10,12 +10,14 @@
       "when": {
         "type": "semantic"
       },
-      "then": {
-        "type": "respond",
-        "canonical_answer": "hahahaha",
-        "reformulate": false,
-        "allow_new_facts": false
-      }
+      "then": [
+        {
+          "type": "respond",
+          "canonical_answer": "hahahaha",
+          "reformulate": false,
+          "allow_new_facts": false
+        }
+      ]
     },
     {
       "id": "password_reset",
@@ -26,12 +28,14 @@
       "when": {
         "type": "semantic"
       },
-      "then": {
-        "type": "respond",
-        "canonical_answer": "The user must contact their administrator to reset the password.",
-        "reformulate": true,
-        "allow_new_facts": false
-      }
+      "then": [
+        {
+          "type": "respond",
+          "canonical_answer": "The user must contact their administrator to reset the password.",
+          "reformulate": true,
+          "allow_new_facts": false
+        }
+      ]
     },
     {
       "id": "no_answer_suggest_email",
@@ -45,12 +49,14 @@
         "operator": "in",
         "value": ["not_found", "insufficient_information"]
       },
-      "then": {
-        "type": "suggest_agent",
-        "agent": "send_email",
-        "label": "Send an email",
-        "requires_confirmation": true
-      }
+      "then": [
+        {
+          "type": "suggest_agent",
+          "agent": "send_email",
+          "label": "Send an email",
+          "requires_confirmation": true
+        }
+      ]
     }
   ]
 }
