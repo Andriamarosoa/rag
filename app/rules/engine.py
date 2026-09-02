@@ -4,16 +4,20 @@ import json
 from pathlib import Path
 from typing import Any
 
-from app.codex.service import CodexService
 from app.flow.events import FlowEmitter, emit_flow
 
 from .models import FunctionalRule, RuleFile
 
 
 class RuleEngine:
-    def __init__(self, rules_path: Path, codex: CodexService):
+    """Loads business rules and enforces model decisions locally.
+
+    Semantic classification is intentionally performed by the same model pass that
+    produces the assistant answer. This engine never calls a model by itself.
+    """
+
+    def __init__(self, rules_path: Path):
         self.rules_path = rules_path
-        self.codex = codex
         self._rules: RuleFile | None = None
 
     def reload(self) -> RuleFile:
@@ -25,43 +29,45 @@ class RuleEngine:
     def rules(self) -> RuleFile:
         return self._rules or self.reload()
 
-    async def match_pre(
-        self,
-        user_message: str,
-        rendered_context: str,
-        emit: FlowEmitter | None = None,
-    ) -> FunctionalRule | None:
-        rules = sorted(
-            [r for r in self.rules.rules if r.enabled and r.phase == "pre"],
-            key=lambda r: r.priority,
+    def semantic_pre_rules(self) -> list[FunctionalRule]:
+        return sorted(
+            [
+                rule
+                for rule in self.rules.rules
+                if rule.enabled
+                and rule.phase == "pre"
+                and rule.when.get("type") == "semantic"
+            ],
+            key=lambda rule: rule.priority,
             reverse=True,
         )
-        semantic = [r for r in rules if r.when.get("type") == "semantic"]
-        await emit_flow(
-            emit,
-            "rules.pre.started",
-            candidate_count=len(semantic),
-        )
+
+    async def resolve_pre_decision(
+        self,
+        decision: dict[str, Any],
+        emit: FlowEmitter | None = None,
+    ) -> FunctionalRule | None:
+        semantic = self.semantic_pre_rules()
+        rule_id = decision.get("matched_rule") or decision.get("rule_id")
+        raw_confidence = decision.get("rule_confidence")
+        if raw_confidence is None:
+            raw_confidence = decision.get("confidence")
+        confidence = float(raw_confidence) if raw_confidence is not None else None
+        parse_mode = decision.get("parse_mode")
+
         if not semantic:
             await emit_flow(emit, "rules.pre.no_match", reason="no_semantic_rules")
             return None
-
-        decision = await self.codex.choose_pre_rule(
-            user_message=user_message,
-            rendered_context=rendered_context,
-            rules=[r.model_dump() for r in semantic],
-            emit=emit,
-        )
-        rule_id = decision.get("rule_id")
-        raw_confidence = decision.get("confidence")
-        confidence = float(raw_confidence) if raw_confidence is not None else None
-        parse_mode = decision.get("parse_mode")
 
         if not rule_id:
             await emit_flow(
                 emit,
                 "rules.pre.no_match",
-                reason="unparseable_model_output" if parse_mode == "unparseable" else "model_returned_null",
+                reason=(
+                    "unparseable_model_output"
+                    if parse_mode == "unparseable"
+                    else "model_returned_null"
+                ),
                 proposed_rule_id=None,
                 confidence=confidence,
                 threshold=0.65,
@@ -69,8 +75,6 @@ class RuleEngine:
             )
             return None
 
-        # Confidence is useful when the model provides it, but absence of that optional score
-        # must not erase an otherwise explicit, exact selection of a configured rule id.
         if confidence is not None and confidence < 0.65:
             await emit_flow(
                 emit,
@@ -83,7 +87,7 @@ class RuleEngine:
             )
             return None
 
-        matched = next((r for r in semantic if r.id == rule_id), None)
+        matched = next((rule for rule in semantic if rule.id == rule_id), None)
         if matched is None:
             await emit_flow(
                 emit,
@@ -109,8 +113,8 @@ class RuleEngine:
     def match_post(self, result: dict[str, Any]) -> list[FunctionalRule]:
         matched: list[FunctionalRule] = []
         rules = sorted(
-            [r for r in self.rules.rules if r.enabled and r.phase == "post"],
-            key=lambda r: r.priority,
+            [rule for rule in self.rules.rules if rule.enabled and rule.phase == "post"],
+            key=lambda rule: rule.priority,
             reverse=True,
         )
         for rule in rules:
