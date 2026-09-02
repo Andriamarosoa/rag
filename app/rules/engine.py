@@ -65,8 +65,6 @@ class RuleEngine:
                 {
                     "decision_elapsed_ms": decision_elapsed_ms,
                     "decision_elapsed_seconds": decision_elapsed_seconds,
-                    # Compatibility with the current chat renderer, which already renders
-                    # `status`. Structured timing fields above are the canonical metrics.
                     "status": f"durée décision: {decision_elapsed_seconds:.1f} s",
                 }
             )
@@ -123,13 +121,16 @@ class RuleEngine:
             )
             return None
 
+        action_types = [str(action.get("type") or "") for action in matched.then]
         await emit_flow(
             emit,
             "rules.pre.matched",
             rule_id=matched.id,
             confidence=confidence,
             priority=matched.priority,
-            action_type=matched.then.get("type"),
+            action_type=action_types[0] if action_types else None,
+            action_types=action_types,
+            action_count=len(matched.then),
             parse_mode=parse_mode,
             **timing,
         )
