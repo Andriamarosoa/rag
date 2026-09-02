@@ -303,7 +303,7 @@ Core RAG variables:
 | `SKB_CHUNK_SIZE` | `1600` | Target maximum chunk characters |
 | `SKB_CHUNK_OVERLAP` | `200` | Character overlap |
 | `SKB_MIN_CHUNK_SIZE` | `80` | Small-tail merge threshold |
-| `SKB_RETRIEVAL_TOP_K` | `6` | Maximum chunks for chat retrieval |
+| `SKB_RETRIEVAL_TOP_K` | `3` | Maximum chunks for grounded chat retrieval |
 | `SKB_RETRIEVAL_MAX_DISTANCE` | `0.45` | Maximum cosine distance |
 | `SKB_ANSWER_MAX_CONTEXT_CHARACTERS` | `24000` | Evidence budget sent to Qwen |
 | `SKB_SYNC_ON_STARTUP` | `true` | Schedule incremental sync after startup |

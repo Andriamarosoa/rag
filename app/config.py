@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     skb_chunk_size: int = 1600
     skb_chunk_overlap: int = 200
     skb_min_chunk_size: int = 80
-    skb_retrieval_top_k: int = 6
+    skb_retrieval_top_k: int = 3
     skb_retrieval_max_distance: float = 0.45
     skb_answer_max_context_characters: int = 24_000
     skb_sync_on_startup: bool = True
