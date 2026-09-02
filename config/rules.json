@@ -16,7 +16,8 @@
           "canonical_answer": "hahahaha",
           "reformulate": false,
           "allow_new_facts": false
-        }
+        },
+        "no_answer_suggest_email"
       ]
     },
     {
