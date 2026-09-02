@@ -12,6 +12,7 @@ from app.codex.client import CodexMcpClient
 from app.codex.service import CodexService
 from app.config import settings
 from app.context.manager import ContextManager
+from app.ollama.client import OllamaNativeClient
 from app.orchestrator import Orchestrator
 from app.rules.engine import RuleEngine
 from app.sessions.store import SessionStore
@@ -33,7 +34,11 @@ codex_client = CodexMcpClient(
     sandbox=settings.codex_sandbox,
     approval_policy=settings.codex_approval_policy,
 )
-codex = CodexService(codex_client)
+ollama_decision_client = OllamaNativeClient(
+    base_url=settings.ollama_base_url,
+    model=settings.ollama_model or settings.codex_model or "qwen3:8b",
+)
+codex = CodexService(codex_client, decision_client=ollama_decision_client)
 context_manager = ContextManager(
     store=store,
     summarizer=codex,
@@ -53,6 +58,7 @@ async def lifespan(_: FastAPI):
     await store.initialize()
     rules.reload()
     yield
+    await ollama_decision_client.close()
     await codex_client.close()
 
 
@@ -71,4 +77,7 @@ async def health() -> dict:
         "ok": True,
         "agents": [spec["name"] for spec in agents.specs()],
         "rules": len(rules.rules.rules),
+        "assistant_decision_provider": "ollama_native",
+        "assistant_decision_model": ollama_decision_client.model,
+        "assistant_decision_thinking": False,
     }
