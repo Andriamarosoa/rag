@@ -63,7 +63,44 @@ class Orchestrator:
             rendered_chars=len(rendered_context),
         )
 
-        pre_rule = await self.rules.match_pre(text, rendered_context, emit=emit)
+        semantic_rules = self.rules.semantic_pre_rules()
+        await emit_flow(
+            emit,
+            "rules.pre.started",
+            candidate_count=len(semantic_rules),
+            integrated_with_reasoning=True,
+        )
+
+        refreshed_chat = await self.store.get_chat(chat.id, user_id)
+        await emit_flow(
+            emit,
+            "reasoning.started",
+            available_agent_count=len(self.agents.specs()),
+            semantic_rule_count=len(semantic_rules),
+            integrated_rule_matching=True,
+        )
+
+        # One model call performs semantic rule selection and normal answer reasoning together.
+        result = await self.codex.answer_with_rules(
+            user_message=text,
+            rendered_context=rendered_context,
+            rules=[rule.model_dump() for rule in semantic_rules],
+            agents=self.agents.specs(),
+            thread_id=refreshed_chat.codex_thread_id if refreshed_chat else None,
+            emit=emit,
+        )
+
+        pre_rule = await self.rules.resolve_pre_decision(result, emit=emit)
+
+        if result.get("thread_id") and result.get("thread_id") != chat.codex_thread_id:
+            await self.store.set_codex_thread(chat.id, result["thread_id"])
+            await emit_flow(
+                emit,
+                "session.codex_thread.updated",
+                chat_id=chat.id,
+                thread_id=result["thread_id"],
+            )
+
         if pre_rule and pre_rule.then.get("type") == "respond":
             canonical = str(pre_rule.then.get("canonical_answer", ""))
             reformulate = bool(pre_rule.then.get("reformulate", False))
@@ -73,23 +110,35 @@ class Orchestrator:
                 rule_id=pre_rule.id,
                 action_type="respond",
                 reformulate=reformulate,
+                source="integrated_model_decision",
             )
+
+            # No second model request here. For exact rules the backend always wins. For
+            # reformulatable rules, the wording generated during the integrated pass is used,
+            # with the canonical answer as a safe fallback if the model omitted it.
             if reformulate:
-                answer = await self.codex.reformulate(canonical, text, rendered_context, emit=emit)
+                model_answer = result.get("answer")
+                answer = str(model_answer).strip() if model_answer else canonical
             else:
                 answer = canonical
-            result: dict[str, Any] = {
-                "status": "answered",
-                "answer": answer,
-                "matched_rule": pre_rule.id,
-                "actions": [],
-            }
+
+            result.update(
+                {
+                    "status": "answered",
+                    "answer": answer,
+                    "matched_rule": pre_rule.id,
+                    "actions": [],
+                    "suggested_agent": None,
+                    "suggested_agent_args": {},
+                }
+            )
             await emit_flow(
                 emit,
                 "rule.action.completed",
                 rule_id=pre_rule.id,
                 action_type="respond",
                 status="answered",
+                second_model_call=False,
             )
         else:
             if pre_rule:
@@ -100,36 +149,7 @@ class Orchestrator:
                     action_type=pre_rule.then.get("type"),
                 )
 
-            refreshed_chat = await self.store.get_chat(chat.id, user_id)
-            await emit_flow(
-                emit,
-                "reasoning.started",
-                available_agent_count=len(self.agents.specs()),
-            )
-            result = await self.codex.answer(
-                user_message=text,
-                rendered_context=rendered_context,
-                agents=self.agents.specs(),
-                thread_id=refreshed_chat.codex_thread_id if refreshed_chat else None,
-                emit=emit,
-            )
-            await emit_flow(
-                emit,
-                "reasoning.completed",
-                status=result.get("status"),
-                suggested_agent=result.get("suggested_agent"),
-            )
-
-            if result.get("thread_id") and result.get("thread_id") != chat.codex_thread_id:
-                await self.store.set_codex_thread(chat.id, result["thread_id"])
-                await emit_flow(
-                    emit,
-                    "session.codex_thread.updated",
-                    chat_id=chat.id,
-                    thread_id=result["thread_id"],
-                )
             result.setdefault("actions", [])
-
             suggested = result.get("suggested_agent")
             if suggested and self.agents.get(suggested):
                 spec = self.agents.get(suggested).spec
@@ -149,6 +169,15 @@ class Orchestrator:
                     requires_confirmation=spec.requires_confirmation,
                     arguments=action["arguments"],
                 )
+
+        await emit_flow(
+            emit,
+            "reasoning.completed",
+            status=result.get("status"),
+            matched_rule=result.get("matched_rule"),
+            suggested_agent=result.get("suggested_agent"),
+            integrated_rule_matching=True,
+        )
 
         await emit_flow(
             emit,
