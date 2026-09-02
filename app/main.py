@@ -10,7 +10,7 @@ from app.agents.email_agent import SendEmailAgent
 from app.agents.registry import AgentRegistry
 from app.agents.skb_search_agent import SkbSearchAgent
 from app.codex.client import CodexMcpClient
-from app.codex.segmented_service import SegmentedDecisionService
+from app.codex.strict_segmented_service import StrictSegmentedDecisionService
 from app.config import settings
 from app.context.manager import ContextManager
 from app.ollama.client import OllamaNativeClient
@@ -47,7 +47,7 @@ skb_client = SkbClient(
     search_max_pages=settings.skb_search_max_pages,
 )
 skb_search_agent = SkbSearchAgent(skb_client)
-codex = SegmentedDecisionService(codex_client, decision_client=ollama_decision_client)
+codex = StrictSegmentedDecisionService(codex_client, decision_client=ollama_decision_client)
 context_manager = ContextManager(
     store=store,
     summarizer=codex,
@@ -100,9 +100,10 @@ async def health() -> dict:
         "assistant_decision_provider": "ollama_native",
         "assistant_decision_model": ollama_decision_client.model,
         "assistant_decision_thinking": False,
-        "assistant_decision_pipeline": "segmented_isolated_classifier_then_answer",
+        "assistant_decision_pipeline": "strict_segmented_isolated_classifier_then_answer",
         "rule_classifier_context": "latest_user_segments_only",
         "segment_tracking": True,
+        "strict_segment_completeness": True,
         "skb_base_url": skb_client.base_url,
         "skb_module_count": len(skb_search_agent.modules),
     }
