@@ -117,6 +117,33 @@ class Orchestrator:
 
         return outputs
 
+    @staticmethod
+    def _compose_post_messages(result: dict[str, Any]) -> list[str]:
+        raw_messages = result.pop("_post_messages", [])
+        if not isinstance(raw_messages, list):
+            raw_messages = []
+
+        messages: list[str] = []
+        seen: set[str] = set()
+        for value in raw_messages:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            key = " ".join(text.split()).casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            messages.append(text)
+
+        result["post_messages"] = messages
+        if messages:
+            current_answer = str(result.get("answer") or "").strip()
+            parts = [current_answer] if current_answer else []
+            parts.extend(messages)
+            result["answer"] = "\n\n".join(parts)
+
+        return messages
+
     async def _execute_reference(
         self,
         rule_id: str,
@@ -311,6 +338,16 @@ class Orchestrator:
             requires_confirmation = bool(
                 action.get("requires_confirmation", agent.spec.requires_confirmation)
             )
+            post_message = str(
+                action.get("post-message", action.get("post_message", "")) or ""
+            ).strip()
+            if post_message:
+                post_messages = result.setdefault("_post_messages", [])
+                if not isinstance(post_messages, list):
+                    post_messages = []
+                    result["_post_messages"] = post_messages
+                post_messages.append(post_message)
+
             ui_action = {
                 "type": "suggest_agent",
                 "agent": agent_name,
@@ -320,6 +357,8 @@ class Orchestrator:
                 "rule_id": rule.id,
                 "origin_rule_id": origin_rule_id,
             }
+            if post_message:
+                ui_action["post-message"] = post_message
             result["actions"].append(ui_action)
             await emit_flow(
                 emit,
@@ -331,6 +370,7 @@ class Orchestrator:
                 action_index=action_index,
                 requires_confirmation=requires_confirmation,
                 arguments=arguments,
+                post_message=post_message or None,
             )
             await emit_flow(
                 emit,
@@ -341,6 +381,7 @@ class Orchestrator:
                 action_index=action_index,
                 action_count=action_count,
                 status="suggested",
+                post_message=post_message or None,
             )
             return True
 
@@ -870,6 +911,17 @@ class Orchestrator:
                 deduplicated=True,
             )
 
+        post_messages = self._compose_post_messages(result)
+        if post_messages:
+            await emit_flow(
+                emit,
+                "response.post_messages.composed",
+                message_count=len(post_messages),
+                chars=sum(len(message) for message in post_messages),
+                separator="blank_line",
+                status_preserved=True,
+            )
+
         answer = result.get("answer")
         if not answer and result.get("status") in {"not_found", "insufficient_information"}:
             answer = "I do not have enough reliable information to answer this question."
@@ -905,6 +957,7 @@ class Orchestrator:
                         for item in result.get("rule_outputs", [])
                         if isinstance(item, dict)
                     ],
+                    "post_messages": result.get("post_messages", []),
                 },
             )
         )
@@ -929,5 +982,6 @@ class Orchestrator:
             matched_rules=matched_rule_ids,
             matched_rule_count=len(matched_rule_ids),
             rule_output_count=len(result.get("rule_outputs") or []),
+            post_message_count=len(result.get("post_messages") or []),
         )
         return result
