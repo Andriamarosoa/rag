@@ -104,19 +104,30 @@ class RuleEngine:
             reverse=True,
         )
 
-    async def resolve_pre_decision(
+    @staticmethod
+    def _decision_matches(decision: dict[str, Any]) -> list[dict[str, Any]]:
+        matches = decision.get("matched_rules")
+        if isinstance(matches, list):
+            return [item for item in matches if isinstance(item, dict)]
+
+        # Temporary compatibility with the former singular decision contract.
+        rule_id = decision.get("matched_rule") or decision.get("rule_id")
+        if not rule_id:
+            return []
+        confidence = decision.get("rule_confidence")
+        if confidence is None:
+            confidence = decision.get("confidence")
+        return [{"rule_id": rule_id, "confidence": confidence}]
+
+    async def resolve_pre_decisions(
         self,
         decision: dict[str, Any],
         emit: FlowEmitter | None = None,
         decision_elapsed_ms: float | None = None,
-    ) -> FunctionalRule | None:
+    ) -> list[FunctionalRule]:
         semantic = self.semantic_pre_rules()
-        rule_id = decision.get("matched_rule") or decision.get("rule_id")
-        raw_confidence = decision.get("rule_confidence")
-        if raw_confidence is None:
-            raw_confidence = decision.get("confidence")
-        confidence = float(raw_confidence) if raw_confidence is not None else None
         parse_mode = decision.get("parse_mode")
+        threshold = 0.65
 
         timing: dict[str, Any] = {
             "timing_scope": "integrated_assistant_decision",
@@ -136,67 +147,123 @@ class RuleEngine:
                 emit,
                 "rules.pre.no_match",
                 reason="no_semantic_rules",
+                match_count=0,
                 **timing,
             )
-            return None
+            return []
 
-        if not rule_id:
+        proposed = self._decision_matches(decision)
+        if not proposed:
             await emit_flow(
                 emit,
                 "rules.pre.no_match",
                 reason=(
                     "unparseable_model_output"
                     if parse_mode == "unparseable"
-                    else "model_returned_null"
+                    else "model_returned_empty_matches"
                 ),
-                proposed_rule_id=None,
-                confidence=confidence,
-                threshold=0.65,
+                proposed_rule_ids=[],
+                threshold=threshold,
                 parse_mode=parse_mode,
+                match_count=0,
                 **timing,
             )
-            return None
+            return []
 
-        if confidence is not None and confidence < 0.65:
+        semantic_by_id = {rule.id: rule for rule in semantic}
+        accepted: list[FunctionalRule] = []
+        accepted_ids: set[str] = set()
+
+        for proposed_index, match in enumerate(proposed):
+            rule_id = str(match.get("rule_id") or "").strip()
+            raw_confidence = match.get("confidence")
+            try:
+                confidence = float(raw_confidence) if raw_confidence is not None else None
+            except (TypeError, ValueError):
+                confidence = None
+
+            reason: str | None = None
+            matched = semantic_by_id.get(rule_id)
+            if not rule_id:
+                reason = "missing_rule_id"
+            elif rule_id in accepted_ids:
+                reason = "duplicate_rule_id"
+            elif confidence is not None and confidence < threshold:
+                reason = "below_confidence_threshold"
+            elif matched is None:
+                reason = "unknown_or_nonsemantic_rule_id"
+
+            if reason:
+                await emit_flow(
+                    emit,
+                    "rules.pre.rejected",
+                    proposed_rule_id=rule_id or None,
+                    proposed_index=proposed_index,
+                    confidence=confidence,
+                    threshold=threshold,
+                    reason=reason,
+                    parse_mode=parse_mode,
+                )
+                continue
+
+            accepted_ids.add(rule_id)
+            accepted.append(matched)
+
+        accepted.sort(key=lambda rule: rule.priority, reverse=True)
+
+        if not accepted:
             await emit_flow(
                 emit,
                 "rules.pre.no_match",
-                reason="below_confidence_threshold",
-                proposed_rule_id=rule_id,
-                confidence=confidence,
-                threshold=0.65,
+                reason="all_proposed_rules_rejected",
+                proposed_rule_ids=[str(item.get("rule_id") or "") for item in proposed],
+                threshold=threshold,
                 parse_mode=parse_mode,
+                match_count=0,
                 **timing,
             )
-            return None
+            return []
 
-        matched = next((rule for rule in semantic if rule.id == rule_id), None)
-        if matched is None:
+        confidence_by_id = {
+            str(item.get("rule_id") or ""): item.get("confidence")
+            for item in proposed
+            if isinstance(item, dict)
+        }
+        accepted_rule_ids = [rule.id for rule in accepted]
+
+        for accepted_index, matched in enumerate(accepted):
+            action_types = self.action_labels(matched)
             await emit_flow(
                 emit,
-                "rules.pre.no_match",
-                reason="unknown_rule_id",
-                proposed_rule_id=rule_id,
-                confidence=confidence,
+                "rules.pre.matched",
+                rule_id=matched.id,
+                accepted_index=accepted_index,
+                accepted_count=len(accepted),
+                accepted_rule_ids=accepted_rule_ids,
+                confidence=confidence_by_id.get(matched.id),
+                priority=matched.priority,
+                action_type=action_types[0] if action_types else None,
+                action_types=action_types,
+                action_count=len(matched.then),
                 parse_mode=parse_mode,
                 **timing,
             )
-            return None
 
-        action_types = self.action_labels(matched)
-        await emit_flow(
-            emit,
-            "rules.pre.matched",
-            rule_id=matched.id,
-            confidence=confidence,
-            priority=matched.priority,
-            action_type=action_types[0] if action_types else None,
-            action_types=action_types,
-            action_count=len(matched.then),
-            parse_mode=parse_mode,
-            **timing,
+        return accepted
+
+    async def resolve_pre_decision(
+        self,
+        decision: dict[str, Any],
+        emit: FlowEmitter | None = None,
+        decision_elapsed_ms: float | None = None,
+    ) -> FunctionalRule | None:
+        """Compatibility wrapper returning only the highest-priority accepted rule."""
+        matches = await self.resolve_pre_decisions(
+            decision,
+            emit=emit,
+            decision_elapsed_ms=decision_elapsed_ms,
         )
-        return matched
+        return matches[0] if matches else None
 
     def match_post(self, result: dict[str, Any]) -> list[FunctionalRule]:
         matched: list[FunctionalRule] = []
