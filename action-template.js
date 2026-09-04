@@ -92,14 +92,15 @@
     const view = ensureFlowView(payload.request_id);
     finishFlow(payload.request_id, d.status === 'source_unavailable');
     view.content.textContent = text;
-    renderSources(view.sources, d.sources);
-    view.actions.innerHTML = '';
-
     const actions = Array.isArray(d.actions) ? d.actions : [];
-    const hasTemplate = actions.some(action => String(action?.template || '').trim());
-    view.actions.style.display = hasTemplate ? 'block' : 'flex';
+    const embeddedActions = renderSources(view.sources, d.sources, actions);
+    const remainingActions = actions.filter(action => !embeddedActions.has(action));
+    view.actions.replaceChildren();
 
-    actions.forEach(action => {
+    const hasTemplate = remainingActions.some(action => String(action?.template || '').trim());
+    view.actions.style.display = remainingActions.length ? (hasTemplate ? 'block' : 'flex') : 'none';
+
+    remainingActions.forEach(action => {
       const template = String(action?.template || '').trim();
       view.actions.appendChild(
         template ? createActionTemplate(action) : createActionButton(action)

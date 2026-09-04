@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import UUID, uuid4
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 
 from app.agents.email_agent import SendEmailAgent
@@ -17,6 +19,7 @@ from app.codex.strict_segmented_service import StrictSegmentedDecisionService
 from app.config import settings
 from app.context.manager import ContextManager
 from app.grounded_answer import GroundedAnswerService
+from app.knowledge.docx import DocxIngestionError, DocxIngestor
 from app.ollama.client import OllamaNativeClient
 from app.rules.engine import RuleEngine
 from app.segmented_orchestrator import SegmentedOrchestrator
@@ -24,7 +27,7 @@ from app.sessions.store import SessionStore
 from app.skb.dokuwiki import DokuWikiClient
 from app.skb.embeddings import OllamaEmbeddingClient
 from app.skb.indexer import SkbIndexer
-from app.skb.models import SKB_MODULES
+from app.skb.models import SKB_MODULES, normalize_module_filter
 from app.skb.retriever import SkbRetriever
 from app.skb.vector_store import MariaDBVectorStore
 from app.ws.manager import ConnectionManager
@@ -34,8 +37,27 @@ from app.ws.router import build_router
 ROOT_DIR = Path(__file__).resolve().parents[1]
 INDEX_HTML = ROOT_DIR / "index.html"
 ACTION_TEMPLATE_JS = ROOT_DIR / "action-template.js"
+KNOWLEDGE_UPLOAD_DIR = (
+    settings.knowledge_upload_dir
+    if settings.knowledge_upload_dir.is_absolute()
+    else ROOT_DIR / settings.knowledge_upload_dir
+).resolve()
+docx_ingestor = DocxIngestor(
+    max_bytes=settings.knowledge_upload_max_bytes,
+    chunk_size=settings.skb_chunk_size,
+    chunk_overlap=settings.skb_chunk_overlap,
+)
 
-store = SessionStore(settings.database_path)
+store = SessionStore(
+    host=settings.db_host,
+    port=settings.db_port,
+    user=settings.db_user,
+    password=settings.db_password,
+    database=settings.db_name,
+    min_pool_size=settings.db_pool_min_size,
+    max_pool_size=settings.db_pool_max_size,
+    connect_timeout=settings.db_connect_timeout_seconds,
+)
 codex_client = CodexMcpClient(
     command=settings.codex_command,
     args=settings.codex_arg_list,
@@ -105,6 +127,7 @@ grounded_answer = GroundedAnswerService(
     skb_retriever,
     ollama_decision_client,
     max_context_characters=settings.skb_answer_max_context_characters,
+    ambiguity_distance_delta=settings.skb_ambiguity_distance_delta,
 )
 orchestrator = SegmentedOrchestrator(
     store,
@@ -241,6 +264,7 @@ async def lifespan(_: FastAPI):
     await skb_wiki_client.close()
     await skb_embedding_client.close()
     await skb_vector_store.close()
+    await store.close()
     await ollama_decision_client.close()
     await codex_client.close()
 
@@ -252,15 +276,20 @@ app.include_router(build_router(manager, orchestrator, agents, rules))
 @app.get("/", include_in_schema=False)
 async def test_ui() -> HTMLResponse:
     html = INDEX_HTML.read_text(encoding="utf-8")
-    script_tag = '<script src="/action-template.js"></script>'
-    if script_tag not in html:
+    asset_version = ACTION_TEMPLATE_JS.stat().st_mtime_ns
+    script_tag = f'<script src="/action-template.js?v={asset_version}"></script>'
+    if 'src="/action-template.js' not in html:
         html = html.replace("</body>", f"{script_tag}\n</body>")
-    return HTMLResponse(html)
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/action-template.js", include_in_schema=False)
 async def action_template_script() -> FileResponse:
-    return FileResponse(ACTION_TEMPLATE_JS, media_type="application/javascript")
+    return FileResponse(
+        ACTION_TEMPLATE_JS,
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @app.get("/health")
@@ -304,6 +333,136 @@ async def skb_modules() -> dict:
         "count": len(modules),
         "modules": modules,
     }
+
+
+def _public_file(record: dict[str, Any], *, created: bool | None = None) -> dict[str, Any]:
+    payload = {
+        key: value
+        for key, value in record.items()
+        if key not in {"storage_key"}
+    }
+    payload["download_url"] = f"/knowledge/files/{record['file_id']}/download"
+    if created is not None:
+        payload["created"] = created
+    return payload
+
+
+@app.post("/knowledge/files", status_code=201)
+async def upload_knowledge_file(
+    module: str = Form(...),
+    file: UploadFile = File(...),
+    title: str | None = Form(default=None),
+) -> dict[str, Any]:
+    namespace = module.strip().casefold()
+    module_map = {item.namespace: item for item in SKB_MODULES}
+    selected = module_map.get(namespace)
+    if selected is None:
+        raise HTTPException(status_code=400, detail={"code": "invalid_module"})
+
+    try:
+        data = await file.read(settings.knowledge_upload_max_bytes + 1)
+    finally:
+        await file.close()
+    if len(data) > settings.knowledge_upload_max_bytes:
+        raise HTTPException(status_code=413, detail={"code": "file_too_large"})
+    try:
+        document = docx_ingestor.ingest(
+            data,
+            filename=file.filename or "document.docx",
+            content_type=file.content_type or "application/octet-stream",
+            module_namespace=namespace,
+            title=title,
+        )
+    except DocxIngestionError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_docx", "message": str(exc)},
+        ) from exc
+
+    try:
+        await _ensure_vector_store()
+        existing = await skb_vector_store.find_knowledge_file(
+            namespace, document.file_sha256
+        )
+        if existing is not None:
+            return _public_file(existing, created=False)
+        vectors = await skb_embedding_client.embed_texts(
+            [chunk.embedding_text for chunk in document.chunks]
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "docx_embedding_failed", "message": str(exc)},
+        ) from exc
+
+    file_id = str(uuid4())
+    storage_key = f"{file_id}.docx"
+    target = (KNOWLEDGE_UPLOAD_DIR / storage_key).resolve()
+    if target.parent != KNOWLEDGE_UPLOAD_DIR:
+        raise HTTPException(status_code=500, detail={"code": "unsafe_storage_path"})
+    temporary = target.with_suffix(".uploading")
+    try:
+        KNOWLEDGE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        temporary.write_bytes(data)
+        os.replace(temporary, target)
+        stored_id, created = await skb_vector_store.add_knowledge_file(
+            file_id=file_id,
+            document=document,
+            module=normalize_module_filter(namespace) or selected.label,
+            storage_key=storage_key,
+            index_signature=skb_indexer.index_signature,
+            embeddings=vectors,
+        )
+        if not created:
+            target.unlink(missing_ok=True)
+        record = await skb_vector_store.get_knowledge_file(stored_id)
+        if record is None:
+            raise RuntimeError("stored DOCX metadata is unavailable")
+        return _public_file(record, created=created)
+    except Exception as exc:
+        temporary.unlink(missing_ok=True)
+        if file_id == locals().get("stored_id", file_id):
+            target.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "docx_storage_failed", "message": str(exc)},
+        ) from exc
+
+
+@app.get("/knowledge/files")
+async def list_knowledge_files() -> dict[str, Any]:
+    await _ensure_vector_store()
+    records = await skb_vector_store.list_knowledge_files()
+    return {"count": len(records), "files": [_public_file(row) for row in records]}
+
+
+@app.get("/knowledge/files/{file_id}/download")
+async def download_knowledge_file(file_id: UUID) -> FileResponse:
+    await _ensure_vector_store()
+    record = await skb_vector_store.get_knowledge_file(str(file_id))
+    if record is None:
+        raise HTTPException(status_code=404, detail={"code": "file_not_found"})
+    storage_key = str(record["storage_key"])
+    target = (KNOWLEDGE_UPLOAD_DIR / storage_key).resolve()
+    if target.parent != KNOWLEDGE_UPLOAD_DIR or not target.is_file():
+        raise HTTPException(status_code=404, detail={"code": "file_content_not_found"})
+    return FileResponse(
+        target,
+        media_type=str(record["mime_type"]),
+        filename=str(record["original_filename"]),
+    )
+
+
+@app.delete("/knowledge/files/{file_id}")
+async def delete_knowledge_file(file_id: UUID) -> dict[str, Any]:
+    await _ensure_vector_store()
+    deleted = await skb_vector_store.delete_knowledge_file(str(file_id))
+    if deleted is None:
+        raise HTTPException(status_code=404, detail={"code": "file_not_found"})
+    target = (KNOWLEDGE_UPLOAD_DIR / str(deleted["storage_key"])).resolve()
+    if target.parent == KNOWLEDGE_UPLOAD_DIR:
+        target.unlink(missing_ok=True)
+    return {"deleted": True, "file_id": str(file_id)}
 
 
 @app.get("/skb/index/status")
@@ -367,6 +526,8 @@ async def skb_search(
                 "snippet": item.text,
                 "score": item.score,
                 "distance": item.distance,
+                "source_kind": item.source_kind,
+                "document_id": item.document_id,
             }
             for item in results
         ],

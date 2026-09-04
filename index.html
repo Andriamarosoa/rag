@@ -107,12 +107,19 @@
     .message-sources.visible { display:block; }
     .message-sources-title { margin-bottom:7px; color:#a8a8b0; font-size:11px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; }
     .message-sources-list { display:flex; flex-wrap:wrap; gap:7px; }
-    .message-source { display:flex; min-width:0; max-width:100%; flex-direction:column; gap:1px; border:1px solid var(--border); border-radius:9px; background:rgba(255,255,255,.035); color:#e4e4e7; padding:7px 10px; text-decoration:none; }
-    .message-source:hover { background:rgba(255,255,255,.075); }
-    .message-source:focus-visible { outline:2px solid #d4d4d8; outline-offset:2px; }
-    .message-source-title { overflow:hidden; font-size:12px; font-weight:650; text-overflow:ellipsis; white-space:nowrap; }
+    .message-source { display:flex; min-width:260px; max-width:100%; flex:1 1 280px; flex-direction:column; gap:1px; border:1px solid var(--border); border-radius:9px; background:rgba(255,255,255,.035); color:#e4e4e7; padding:9px 10px; }
+    .message-source-head { display:flex; min-width:0; align-items:center; gap:8px; }
+    .message-source-title { min-width:0; flex:1; overflow:hidden; font-size:12px; font-weight:650; text-overflow:ellipsis; white-space:nowrap; }
     .message-source-meta { color:#999; font-size:10px; }
+    .message-source-controls { display:flex; align-items:center; gap:7px; margin-top:8px; }
+    .message-source-button { display:inline-flex; min-height:32px; flex:1 1 0; align-items:center; justify-content:center; border:1px solid var(--border); border-radius:7px; padding:6px 10px; cursor:pointer; font-size:12px; font-weight:650; line-height:1.2; text-align:center; text-decoration:none; }
+    .message-source-continue { background:#fff; color:#111; }
+    .message-source-continue:hover { background:#e8e8e8; }
+    .message-source-visit { background:transparent; color:#e4e4e7; }
+    .message-source-visit:hover { background:rgba(255,255,255,.10); color:#fff; }
+    .message-source-button:focus-visible { outline:2px solid #d4d4d8; outline-offset:2px; }
     .message-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
+    .message-actions:empty { display:none; }
     .action-button { border:1px solid var(--border); background:#fff; color:#111; border-radius:9px; padding:8px 12px; cursor:pointer; font-size:13px; font-weight:650; }
     .action-button:hover { background:#e8e8e8; }
 
@@ -164,6 +171,9 @@
     .module-select { min-width:0; max-width:260px; border:1px solid var(--border); border-radius:8px; background:#262626; color:var(--text); padding:5px 28px 5px 8px; font-size:12px; cursor:pointer; }
     .module-select:hover { background:#2b2b2b; }
     .module-select:focus-visible { outline:2px solid #d4d4d8; outline-offset:2px; }
+    .upload-button { flex:0 0 auto; border:1px solid var(--border); border-radius:8px; background:#262626; color:var(--text); padding:5px 9px; cursor:pointer; font-size:12px; font-weight:650; }
+    .upload-button:hover { background:#2f2f2f; }
+    .upload-button:disabled { opacity:.45; cursor:default; }
     .composer-bottom { display:flex; justify-content:space-between; align-items:center; gap:8px; }
     .composer-note { font-size:11px; color:#777; padding-left:4px; }
     .send-button { width:34px; height:34px; border:0; border-radius:50%; cursor:pointer; background:#fff; color:#111; display:grid; place-items:center; font-size:17px; font-weight:900; }
@@ -330,6 +340,17 @@
       <button id="reloadRulesBtn" class="dev-button" type="button">Reload rules</button>
       <button id="clearDebugBtn" class="dev-button" type="button">Effacer debug</button>
     </div>
+    <section class="dev-section">
+      <h3>Ressources DOCX</h3>
+      <div class="dev-field">
+        <label for="developerModuleSelect">Module SKB</label>
+        <select id="developerModuleSelect" class="module-select" title="Module de la ressource DOCX"></select>
+      </div>
+      <div class="dev-actions">
+        <button id="uploadDocxBtn" class="upload-button" type="button" title="Indexer une ressource DOCX">Importer et indexer un DOCX</button>
+        <input id="uploadDocxInput" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden />
+      </div>
+    </section>
     <div class="dev-field"><label for="connectionId">Connection ID</label><input id="connectionId" readonly value="-" /></div>
     <section class="dev-section"><h3>Flow brut</h3><div id="timeline"></div></section>
     <section class="dev-section"><h3>Événements WebSocket</h3><div id="events"></div></section>
@@ -345,10 +366,18 @@
   const emptyState = $('emptyState');
   const input = $('messageInput');
   const moduleSelect = $('moduleSelect');
+  const developerModuleSelect = $('developerModuleSelect');
   const sendBtn = $('sendBtn');
+  const uploadDocxBtn = $('uploadDocxBtn');
+  const uploadDocxInput = $('uploadDocxInput');
   const timeline = $('timeline');
   const events = $('events');
   const wsUrl = $('wsUrl');
+
+  developerModuleSelect.replaceChildren(
+    ...[...moduleSelect.options].map(option=>option.cloneNode(true))
+  );
+  developerModuleSelect.value=moduleSelect.value;
   const composerWrap = $('composerWrap');
   const jumpBottomBtn = $('jumpBottomBtn');
 
@@ -361,6 +390,29 @@
   const RESPONSE_HANDLERS = new Map();
   const ACTION_HANDLERS = new Map();
   const FLOW_VIEWS = new Map();
+  const STORAGE_KEYS = Object.freeze({
+    module: 'rag.skb.module',
+    chatId: 'rag.chat.id'
+  });
+
+  function readStoredValue(key){
+    try{ return localStorage.getItem(key)||''; }
+    catch{ return ''; }
+  }
+
+  function writeStoredValue(key,value){
+    try{
+      if(value) localStorage.setItem(key,value);
+      else localStorage.removeItem(key);
+    }catch{}
+  }
+
+  function restorePersistentState(){
+    const savedModule=readStoredValue(STORAGE_KEYS.module);
+    const validModule=[...moduleSelect.options].some(option=>option.value===savedModule);
+    if(validModule) moduleSelect.value=savedModule;
+    $('chatId').value=readStoredValue(STORAGE_KEYS.chatId);
+  }
 
   const defaultWs = location.protocol === 'https:'
     ? `wss://${location.host}/ws`
@@ -539,7 +591,7 @@
     const d=payload.data||{};
     if(t==='flow.started') return 'flow';
     if(t==='session.ready') return 'session';
-    if(t==='message.user.persisted') return 'user-persist';
+    if(t==='message.user.persisted'||t==='message.user.reused') return 'user-persist';
     if(t==='context.snapshot'||t==='context.ready') return 'context';
     if(t.startsWith('context.compaction.')) return 'context-compaction';
     if(t.startsWith('rag.retrieval.')) return 'rag-retrieval';
@@ -563,6 +615,7 @@
     if(t==='flow.started') return 'Préparation de la requête';
     if(t==='session.ready') return 'Session chargée';
     if(t==='message.user.persisted') return 'Message utilisateur enregistré';
+    if(t==='message.user.reused') return 'Question conservée · module appliqué';
     if(t==='context.snapshot') return 'Analyse du contexte';
     if(t==='context.ready') return 'Contexte prêt';
     if(t==='context.compaction.skipped') return 'Compaction du contexte non nécessaire';
@@ -717,45 +770,68 @@
     const view=ensureFlowView(payload.request_id);
     finishFlow(payload.request_id,d.status==='source_unavailable');
     view.content.textContent=text;
-    renderSources(view.sources,d.sources);
-    view.actions.innerHTML='';
-    (d.actions||[]).forEach(action=>view.actions.appendChild(createActionButton(action)));
+    const actions=Array.isArray(d.actions)?d.actions:[];
+    const embeddedActions=renderSources(view.sources,d.sources,actions);
+    const remainingActions=actions.filter(action=>!embeddedActions.has(action));
+    view.actions.replaceChildren();
+    view.actions.style.display=remainingActions.length?'flex':'none';
+    remainingActions.forEach(action=>view.actions.appendChild(createActionButton(action)));
     scrollChat();
   }
 
   function safeHttpUrl(value){
     if(typeof value!=='string'||!value.trim()) return null;
     try{
-      const url=new URL(value);
+      const url=new URL(value,location.origin);
       const safeProtocol=url.protocol==='http:'||url.protocol==='https:';
       const safeHost=url.hostname.toLowerCase()==='skb.uniconsults.mu';
-      return safeProtocol&&safeHost?url.href:null;
+      const safeFile=url.origin===location.origin
+        && /^\/knowledge\/files\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/download$/i.test(url.pathname)
+        && !url.search
+        && !url.hash;
+      return safeProtocol&&(safeHost||safeFile)?url.href:null;
     }catch{
       return null;
     }
   }
 
-  function renderSources(container,rawSources){
+  function normalizedModuleValue(value){
+    return String(value||'').trim().toLocaleLowerCase();
+  }
+
+  function findSourceModuleAction(source,actions){
+    const pageNamespace=normalizedModuleValue(source?.page_id).split(':')[0];
+    return actions.find(action=>{
+      if(action?.type!=='select_module') return false;
+      const actionModule=normalizedModuleValue(action.module);
+      return Boolean(pageNamespace&&actionModule&&pageNamespace===actionModule);
+    });
+  }
+
+  function renderSources(container,rawSources,rawActions=[]){
     container.replaceChildren();
     container.classList.remove('visible');
-    if(!Array.isArray(rawSources)) return;
+    const embeddedActions=new Set();
+    if(!Array.isArray(rawSources)) return embeddedActions;
 
-    const links=[];
+    const actions=Array.isArray(rawActions)?rawActions:[];
+
+    const cards=[];
     rawSources.forEach((source,index)=>{
       if(!source||typeof source!=='object') return;
       const href=safeHttpUrl(source.url);
       if(!href) return;
 
-      const link=document.createElement('a');
-      link.className='message-source';
-      link.href=href;
-      link.target='_blank';
-      link.rel='noopener';
+      const card=document.createElement('div');
+      card.className='message-source';
+      const head=document.createElement('div');
+      head.className='message-source-head';
 
       const title=document.createElement('span');
       title.className='message-source-title';
       title.textContent=String(source.title||`Source ${index+1}`);
-      link.appendChild(title);
+      head.appendChild(title);
+      card.appendChild(head);
 
       const metadata=[source.module,source.section]
         .map(value=>String(value||'').trim())
@@ -764,20 +840,44 @@
         const meta=document.createElement('span');
         meta.className='message-source-meta';
         meta.textContent=metadata.join(' · ');
-        link.appendChild(meta);
+        card.appendChild(meta);
       }
-      links.push(link);
+
+      const controls=document.createElement('div');
+      controls.className='message-source-controls';
+      const sourceAction=findSourceModuleAction(source,actions);
+      if(sourceAction){
+        const continueButton=createActionButton(sourceAction);
+        continueButton.className='message-source-button message-source-continue';
+        continueButton.textContent='Continuer';
+        controls.appendChild(continueButton);
+        embeddedActions.add(sourceAction);
+      }
+
+      const visitLink=document.createElement('a');
+      visitLink.className='message-source-button message-source-visit';
+      visitLink.href=href;
+      visitLink.target='_blank';
+      visitLink.rel='noopener';
+      const isFile=source.source_kind==='file';
+      visitLink.setAttribute('aria-label',`${isFile?'Ouvrir le fichier':'Visiter la source officielle'} : ${title.textContent}`);
+      visitLink.title=isFile?'Ouvrir le fichier':'Visiter la source officielle';
+      visitLink.textContent=isFile?'Ouvrir le fichier ↗':'Visiter le lien ↗';
+      controls.appendChild(visitLink);
+      card.appendChild(controls);
+      cards.push(card);
     });
 
-    if(!links.length) return;
+    if(!cards.length) return embeddedActions;
     const title=document.createElement('div');
     title.className='message-sources-title';
-    title.textContent='Sources SKB';
+    title.textContent='Sources';
     const list=document.createElement('div');
     list.className='message-sources-list';
-    list.append(...links);
+    list.append(...cards);
     container.append(title,list);
     container.classList.add('visible');
+    return embeddedActions;
   }
 
   function createActionButton(action){
@@ -901,6 +1001,7 @@
 
       if(p.chat_id){
         $('chatId').value=p.chat_id;
+        writeStoredValue(STORAGE_KEYS.chatId,p.chat_id);
         syncSession();
       }
 
@@ -980,6 +1081,7 @@
 
   function resetConversation(){
     $('chatId').value='';
+    writeStoredValue(STORAGE_KEYS.chatId,'');
     syncSession();
     FLOW_VIEWS.clear();
     [...conversation.querySelectorAll('.message-row')].forEach(e=>e.remove());
@@ -1018,6 +1120,58 @@
 
   sendBtn.onclick=sendMessage;
   $('newChatBtn').onclick=resetConversation;
+  moduleSelect.addEventListener('change',()=>{
+    writeStoredValue(STORAGE_KEYS.module,moduleSelect.value);
+  });
+  uploadDocxBtn.onclick=()=>{
+    if(!developerModuleSelect.value){
+      toast('Sélectionnez d’abord le module du document.','error');
+      return;
+    }
+    uploadDocxInput.click();
+  };
+  uploadDocxInput.addEventListener('change',async()=>{
+    const file=uploadDocxInput.files?.[0];
+    if(!file) return;
+    const namespace=developerModuleSelect.value;
+    if(!namespace){
+      toast('Sélectionnez d’abord le module du document.','error');
+      uploadDocxInput.value='';
+      return;
+    }
+    const form=new FormData();
+    form.append('module',namespace);
+    form.append('file',file,file.name);
+    uploadDocxBtn.disabled=true;
+    uploadDocxBtn.textContent='Indexation…';
+    try{
+      const response=await fetch('/knowledge/files',{method:'POST',body:form});
+      const result=await response.json();
+      if(!response.ok) throw new Error(result?.detail?.message||'Import DOCX impossible');
+      toast(result.created===false?'Ce document est déjà indexé.':'Document DOCX indexé.','success');
+    }catch(error){
+      toast(error?.message||'Import DOCX impossible','error');
+    }finally{
+      uploadDocxInput.value='';
+      uploadDocxBtn.disabled=false;
+      uploadDocxBtn.textContent='Importer et indexer un DOCX';
+    }
+  });
+  registerActionHandler('select_module',action=>{
+    const namespace=String(action.module||'').trim().toLowerCase();
+    const question=String(action.question||'').trim();
+    const validModule=[...moduleSelect.options].some(option=>option.value===namespace);
+    if(!validModule||!question){
+      toast('Ce choix de module est invalide.','error');
+      return;
+    }
+    moduleSelect.value=namespace;
+    writeStoredValue(STORAGE_KEYS.module,namespace);
+    const payload=envelope('chat.continue',{question,module:namespace});
+    autoFollow=true;
+    ensureFlowView(payload.request_id);
+    send(payload);
+  });
   $('developerBtn').onclick=$('mobileDeveloperBtn').onclick=()=>$('developerPanel').classList.add('open');
   $('developerClose').onclick=()=>$('developerPanel').classList.remove('open');
   $('reconnectBtn').onclick=connect;
@@ -1025,7 +1179,10 @@
   $('reloadRulesBtn').onclick=()=>send(envelope('rules.reload'));
   $('clearDebugBtn').onclick=()=>{ timeline.innerHTML=''; events.innerHTML=''; };
   $('userId').addEventListener('input',syncSession);
-  $('chatId').addEventListener('input',syncSession);
+  $('chatId').addEventListener('input',()=>{
+    writeStoredValue(STORAGE_KEYS.chatId,$('chatId').value.trim());
+    syncSession();
+  });
   $('emailModalClose').onclick=$('emailCancel').onclick=closeEmailModal;
   $('emailSend').onclick=submitEmail;
   $('emailModal').onclick=e=>{ if(e.target===$('emailModal')) closeEmailModal(); };
@@ -1049,6 +1206,7 @@
     if(autoFollow) scrollChat();
   });
 
+  restorePersistentState();
   syncSession();
   setConnectionState(false,'Connexion…');
   updateComposerSpace();

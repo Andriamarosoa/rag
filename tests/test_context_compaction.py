@@ -1,10 +1,7 @@
-from pathlib import Path
-
 import pytest
 
 from app.context.manager import ContextManager
-from app.sessions.models import ChatMessage
-from app.sessions.store import SessionStore
+from app.sessions.models import ChatMessage, ChatSession
 
 
 class FakeSummarizer:
@@ -12,10 +9,37 @@ class FakeSummarizer:
         return f"summary:{previous_summary}|" + ";".join(m.content for m in messages)
 
 
+class FakeStore:
+    def __init__(self):
+        self.chat = ChatSession(id="chat-1", user_id="u1")
+        self.messages = []
+
+    async def get_or_create_chat(self, user_id, chat_id=None):
+        return self.chat
+
+    async def get_chat(self, chat_id, user_id=None):
+        if chat_id != self.chat.id or (user_id and user_id != self.chat.user_id):
+            return None
+        return self.chat
+
+    async def append_message(self, message):
+        self.messages.append(message)
+
+    async def list_messages(self, chat_id):
+        return list(self.messages)
+
+    async def replace_compacted_history(
+        self, chat_id, summary, keep_message_ids, estimated_tokens
+    ):
+        keep = set(keep_message_ids)
+        self.messages = [message for message in self.messages if message.id in keep]
+        self.chat.summary = summary
+        self.chat.estimated_tokens = estimated_tokens
+
+
 @pytest.mark.asyncio
-async def test_context_compacts_old_messages(tmp_path: Path):
-    store = SessionStore(tmp_path / "rag.db")
-    await store.initialize()
+async def test_context_compacts_old_messages():
+    store = FakeStore()
     chat = await store.get_or_create_chat("u1")
     for i in range(8):
         await store.append_message(ChatMessage(chat_id=chat.id, role="user", content=(f"message-{i}-" + "x" * 80)))

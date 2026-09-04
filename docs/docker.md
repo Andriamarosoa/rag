@@ -8,7 +8,7 @@ Browser
    | HTTP/WebSocket :8765
    v
 rag-backend
-   |- FastAPI and SQLite chat sessions
+   |- FastAPI and MariaDB chat sessions
    |- DokuWiki indexer and chunker
    |- Ollama embedding and chat clients
    |- validated-citation answer service
@@ -217,8 +217,8 @@ VECTOR(1024), a VECTOR INDEX with DISTANCE=cosine, and VEC_DISTANCE_COSINE.
 ## Persistence
 
 ~~~text
-./mariadb_data -> SKB pages, chunks, embeddings, and vector index
-./data         -> SQLite chat/session state
+./mariadb_data -> chats, messages, SKB/DOCX metadata, chunks, and embeddings
+./data/uploads -> original DOCX files (their index and metadata stay in MariaDB)
 ./codex_data   -> Codex compatibility state and configuration
 ~~~
 
@@ -233,5 +233,7 @@ credentials beyond isolated local development.
   sources.
 - Invalid citations, non-verbatim evidence quotes, or any unsupported claim:
   all generated text is discarded and replaced by the abstention.
+- Nearly tied results from different modules without a module filter:
+  clarification_needed with validated candidate sources; generation is skipped.
 - Sync errors appear in /skb/index/status. A synchronous `wait=true` request
   returns HTTP 502 when the generation could not be activated.

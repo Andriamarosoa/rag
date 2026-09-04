@@ -12,6 +12,11 @@ class FakeStore:
     async def get_or_create_chat(self, user_id: str, chat_id: str | None = None):
         return ChatSession(id=chat_id or "chat-1", user_id=user_id)
 
+    async def get_chat(self, chat_id: str, user_id: str | None = None):
+        if chat_id != "chat-1" or (user_id is not None and user_id != "user-1"):
+            return None
+        return ChatSession(id=chat_id, user_id="user-1")
+
     async def append_message(self, message):
         self.messages.append(message)
 
@@ -94,3 +99,41 @@ async def test_grounded_path_bypasses_rules_and_persists_sources():
     assert store.messages[1].metadata["sources"][0]["page_id"] == "spay:faq:faq"
     assert "rules.pre.started" not in [event_type for event_type, _ in events]
     assert "rag.retrieval.completed" in [event_type for event_type, _ in events]
+
+
+async def test_module_continuation_reuses_question_without_duplicate_user_message():
+    store = FakeStore()
+    store.messages.append(
+        type(
+            "Message",
+            (),
+            {"role": "user", "content": "How do I reset my password?"},
+        )()
+    )
+    grounded = FakeGroundedAnswer()
+    orchestrator = Orchestrator(
+        store=store,  # type: ignore[arg-type]
+        context=None,  # type: ignore[arg-type]
+        rules=None,  # type: ignore[arg-type]
+        agents=AgentRegistry(),
+        codex=None,  # type: ignore[arg-type]
+        grounded_answer=grounded,  # type: ignore[arg-type]
+    )
+    events = []
+
+    async def emit(event_type, data):
+        events.append((event_type, data))
+
+    result = await orchestrator.handle_message(
+        "user-1",
+        "chat-1",
+        "How do I reset my password?",
+        emit=emit,
+        module="spay",
+        continuation=True,
+    )
+
+    assert result["chat_id"] == "chat-1"
+    assert [message.role for message in store.messages] == ["user", "assistant"]
+    assert "message.user.reused" in [event_type for event_type, _ in events]
+    assert "message.user.persisted" not in [event_type for event_type, _ in events]

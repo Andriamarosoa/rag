@@ -173,12 +173,29 @@ def build_router(
                     )
                     continue
 
-                if event.type == "chat.message":
-                    text = str(event.data.get("text", "")).strip()
+                if event.type in {"chat.message", "chat.continue"}:
+                    continuation = event.type == "chat.continue"
+                    text_key = "question" if continuation else "text"
+                    text = str(event.data.get(text_key, "")).strip()
                     if not text:
                         await manager.send(
                             session,
-                            ServerEnvelope(type="error", request_id=event.request_id, data={"code": "empty_message"}).model_dump(),
+                            ServerEnvelope(
+                                type="error",
+                                request_id=event.request_id,
+                                data={"code": "empty_continuation" if continuation else "empty_message"},
+                            ).model_dump(),
+                        )
+                        continue
+                    if continuation and not (event.chat_id or session.chat_id):
+                        await manager.send(
+                            session,
+                            ServerEnvelope(
+                                type="error",
+                                request_id=event.request_id,
+                                user_id=event.user_id,
+                                data={"code": "missing_chat_id"},
+                            ).model_dump(),
                         )
                         continue
                     if len(text) > 20_000:
@@ -234,6 +251,7 @@ def build_router(
                             text,
                             emit=send_flow_event,
                             module=module,
+                            continuation=continuation,
                         )
                     except Exception as exc:
                         await send_flow_event(

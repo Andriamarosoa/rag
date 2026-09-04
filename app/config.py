@@ -11,7 +11,6 @@ class Settings(BaseSettings):
 
     app_host: str = "0.0.0.0"
     app_port: int = 8765
-    database_path: Path = Path("data/rag.db")
     rules_path: Path = Path("config/rules")
 
     context_compact_at_tokens: int = 50_000
@@ -52,8 +51,12 @@ class Settings(BaseSettings):
     skb_min_chunk_size: int = 80
     skb_retrieval_top_k: int = 3
     skb_retrieval_max_distance: float = 0.45
+    skb_ambiguity_distance_delta: float = 0.02
     skb_answer_max_context_characters: int = 24_000
     skb_sync_on_startup: bool = True
+
+    knowledge_upload_dir: Path = Path("data/uploads")
+    knowledge_upload_max_bytes: int = 15 * 1024 * 1024
 
     db_host: str = "127.0.0.1"
     db_port: int = 3307

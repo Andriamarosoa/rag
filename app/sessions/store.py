@@ -1,120 +1,210 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
-import sqlite3
-from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from .models import ChatMessage, ChatSession, utc_now
 
 
 class SessionStore:
-    """SQLite persistence for users/chats/messages.
+    """MariaDB persistence for chats and messages."""
 
-    SQLite calls are moved to worker threads so the FastAPI event loop remains free.
-    """
-
-    def __init__(self, database_path: Path):
-        self.database_path = database_path
+    def __init__(
+        self,
+        *,
+        host: str,
+        port: int,
+        user: str,
+        password: str,
+        database: str,
+        min_pool_size: int = 1,
+        max_pool_size: int = 5,
+        connect_timeout: float = 10.0,
+    ) -> None:
+        self.host = host
+        self.port = int(port)
+        self.user = user
+        self.password = password
+        self.database = database
+        self.min_pool_size = int(min_pool_size)
+        self.max_pool_size = int(max_pool_size)
+        self.connect_timeout = float(connect_timeout)
+        self._pool: Any | None = None
+        self._aiomysql: Any | None = None
+        self._initialize_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(self._initialize_sync)
-
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.database_path)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    def _initialize_sync(self) -> None:
-        with self._connect() as conn:
-            conn.executescript(
-                """
-                PRAGMA journal_mode=WAL;
-                CREATE TABLE IF NOT EXISTS chats (
-                    id TEXT PRIMARY KEY,
-                    user_id TEXT NOT NULL,
-                    summary TEXT NOT NULL DEFAULT '',
-                    estimated_tokens INTEGER NOT NULL DEFAULT 0,
-                    codex_thread_id TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_chats_user ON chats(user_id, updated_at DESC);
-
-                CREATE TABLE IF NOT EXISTS messages (
-                    id TEXT PRIMARY KEY,
-                    chat_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE
-                );
-                CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, created_at ASC);
-                """
+        if self._pool is not None:
+            return
+        async with self._initialize_lock:
+            if self._pool is not None:
+                return
+            aiomysql = importlib.import_module("aiomysql")
+            pool = await aiomysql.create_pool(
+                host=self.host,
+                port=self.port,
+                user=self.user,
+                password=self.password,
+                db=self.database,
+                minsize=self.min_pool_size,
+                maxsize=self.max_pool_size,
+                connect_timeout=self.connect_timeout,
+                charset="utf8mb4",
+                autocommit=False,
+                pool_recycle=3_600,
             )
+            self._aiomysql = aiomysql
+            self._pool = pool
+            try:
+                await self._initialize_schema()
+            except BaseException:
+                self._pool = None
+                pool.close()
+                await pool.wait_closed()
+                raise
 
-    async def get_or_create_chat(self, user_id: str, chat_id: str | None = None) -> ChatSession:
-        return await asyncio.to_thread(self._get_or_create_chat_sync, user_id, chat_id)
+    async def close(self) -> None:
+        pool, self._pool = self._pool, None
+        if pool is not None:
+            pool.close()
+            await pool.wait_closed()
 
-    def _get_or_create_chat_sync(self, user_id: str, chat_id: str | None) -> ChatSession:
-        with self._connect() as conn:
-            if chat_id:
-                row = conn.execute("SELECT * FROM chats WHERE id = ? AND user_id = ?", (chat_id, user_id)).fetchone()
-                if row:
-                    return self._chat_from_row(row)
+    def _require_pool(self) -> Any:
+        if self._pool is None:
+            raise RuntimeError("SessionStore.initialize() has not been called")
+        return self._pool
 
-            chat_id = chat_id or str(uuid4())
-            now = utc_now()
-            conn.execute(
-                "INSERT INTO chats(id, user_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                (chat_id, user_id, now, now),
-            )
-            conn.commit()
-            return ChatSession(id=chat_id, user_id=user_id, created_at=now, updated_at=now)
+    async def _initialize_schema(self) -> None:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            async with connection.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS chats (
+                        id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin
+                            NOT NULL PRIMARY KEY,
+                        user_id VARCHAR(255) NOT NULL,
+                        summary MEDIUMTEXT NOT NULL,
+                        estimated_tokens BIGINT UNSIGNED NOT NULL DEFAULT 0,
+                        codex_thread_id VARCHAR(255) NULL,
+                        created_at VARCHAR(40) NOT NULL,
+                        updated_at VARCHAR(40) NOT NULL,
+                        KEY idx_chats_user (user_id, updated_at)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                        COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                await cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS messages (
+                        id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin
+                            NOT NULL PRIMARY KEY,
+                        chat_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin
+                            NOT NULL,
+                        role VARCHAR(16) NOT NULL,
+                        content MEDIUMTEXT NOT NULL,
+                        metadata_json JSON NOT NULL,
+                        created_at VARCHAR(40) NOT NULL,
+                        KEY idx_messages_chat (chat_id, created_at),
+                        CONSTRAINT fk_messages_chat FOREIGN KEY (chat_id)
+                            REFERENCES chats(id) ON DELETE CASCADE
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                        COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+            await connection.commit()
 
-    async def get_chat(self, chat_id: str, user_id: str | None = None) -> ChatSession | None:
-        return await asyncio.to_thread(self._get_chat_sync, chat_id, user_id)
+    async def get_or_create_chat(
+        self, user_id: str, chat_id: str | None = None
+    ) -> ChatSession:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            async with connection.cursor(self._aiomysql.DictCursor) as cursor:
+                if chat_id:
+                    await cursor.execute(
+                        "SELECT * FROM chats WHERE id=%s AND user_id=%s",
+                        (chat_id, user_id),
+                    )
+                    row = await cursor.fetchone()
+                    if row:
+                        return self._chat_from_row(row)
+                selected_id = chat_id or str(uuid4())
+                now = utc_now()
+                await cursor.execute(
+                    """
+                    INSERT INTO chats(
+                        id, user_id, summary, estimated_tokens,
+                        codex_thread_id, created_at, updated_at
+                    ) VALUES (%s,%s,'',0,NULL,%s,%s)
+                    """,
+                    (selected_id, user_id, now, now),
+                )
+            await connection.commit()
+        return ChatSession(
+            id=selected_id,
+            user_id=user_id,
+            created_at=now,
+            updated_at=now,
+        )
 
-    def _get_chat_sync(self, chat_id: str, user_id: str | None) -> ChatSession | None:
-        with self._connect() as conn:
-            if user_id:
-                row = conn.execute("SELECT * FROM chats WHERE id = ? AND user_id = ?", (chat_id, user_id)).fetchone()
-            else:
-                row = conn.execute("SELECT * FROM chats WHERE id = ?", (chat_id,)).fetchone()
-            return self._chat_from_row(row) if row else None
+    async def get_chat(
+        self, chat_id: str, user_id: str | None = None
+    ) -> ChatSession | None:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            async with connection.cursor(self._aiomysql.DictCursor) as cursor:
+                if user_id:
+                    await cursor.execute(
+                        "SELECT * FROM chats WHERE id=%s AND user_id=%s",
+                        (chat_id, user_id),
+                    )
+                else:
+                    await cursor.execute("SELECT * FROM chats WHERE id=%s", (chat_id,))
+                row = await cursor.fetchone()
+        return self._chat_from_row(row) if row else None
 
     async def append_message(self, message: ChatMessage) -> None:
-        await asyncio.to_thread(self._append_message_sync, message)
-
-    def _append_message_sync(self, message: ChatMessage) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT INTO messages(id, chat_id, role, content, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (message.id, message.chat_id, message.role, message.content, json.dumps(message.metadata), message.created_at),
-            )
-            conn.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (utc_now(), message.chat_id))
-            conn.commit()
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            try:
+                async with connection.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        INSERT INTO messages(
+                            id, chat_id, role, content, metadata_json, created_at
+                        ) VALUES (%s,%s,%s,%s,%s,%s)
+                        """,
+                        (
+                            message.id,
+                            message.chat_id,
+                            message.role,
+                            message.content,
+                            json.dumps(message.metadata, ensure_ascii=False),
+                            message.created_at,
+                        ),
+                    )
+                    await cursor.execute(
+                        "UPDATE chats SET updated_at=%s WHERE id=%s",
+                        (utc_now(), message.chat_id),
+                    )
+                await connection.commit()
+            except BaseException:
+                await connection.rollback()
+                raise
 
     async def list_messages(self, chat_id: str) -> list[ChatMessage]:
-        return await asyncio.to_thread(self._list_messages_sync, chat_id)
-
-    def _list_messages_sync(self, chat_id: str) -> list[ChatMessage]:
-        with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at ASC", (chat_id,)).fetchall()
-        return [
-            ChatMessage(
-                id=row["id"],
-                chat_id=row["chat_id"],
-                role=row["role"],
-                content=row["content"],
-                metadata=json.loads(row["metadata_json"] or "{}"),
-                created_at=row["created_at"],
-            )
-            for row in rows
-        ]
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            async with connection.cursor(self._aiomysql.DictCursor) as cursor:
+                await cursor.execute(
+                    "SELECT * FROM messages WHERE chat_id=%s ORDER BY created_at,id",
+                    (chat_id,),
+                )
+                rows = await cursor.fetchall()
+        return [self._message_from_row(row) for row in rows]
 
     async def replace_compacted_history(
         self,
@@ -123,55 +213,77 @@ class SessionStore:
         keep_message_ids: list[str],
         estimated_tokens: int,
     ) -> None:
-        await asyncio.to_thread(
-            self._replace_compacted_history_sync,
-            chat_id,
-            summary,
-            keep_message_ids,
-            estimated_tokens,
-        )
-
-    def _replace_compacted_history_sync(
-        self,
-        chat_id: str,
-        summary: str,
-        keep_message_ids: list[str],
-        estimated_tokens: int,
-    ) -> None:
-        with self._connect() as conn:
-            if keep_message_ids:
-                placeholders = ",".join("?" for _ in keep_message_ids)
-                conn.execute(
-                    f"DELETE FROM messages WHERE chat_id = ? AND id NOT IN ({placeholders})",
-                    [chat_id, *keep_message_ids],
-                )
-            else:
-                conn.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
-            conn.execute(
-                "UPDATE chats SET summary = ?, estimated_tokens = ?, updated_at = ? WHERE id = ?",
-                (summary, estimated_tokens, utc_now(), chat_id),
-            )
-            conn.commit()
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            try:
+                async with connection.cursor() as cursor:
+                    if keep_message_ids:
+                        placeholders = ",".join("%s" for _ in keep_message_ids)
+                        await cursor.execute(
+                            f"DELETE FROM messages WHERE chat_id=%s "
+                            f"AND id NOT IN ({placeholders})",
+                            (chat_id, *keep_message_ids),
+                        )
+                    else:
+                        await cursor.execute(
+                            "DELETE FROM messages WHERE chat_id=%s", (chat_id,)
+                        )
+                    await cursor.execute(
+                        """
+                        UPDATE chats
+                        SET summary=%s, estimated_tokens=%s, updated_at=%s
+                        WHERE id=%s
+                        """,
+                        (summary, max(0, int(estimated_tokens)), utc_now(), chat_id),
+                    )
+                await connection.commit()
+            except BaseException:
+                await connection.rollback()
+                raise
 
     async def set_codex_thread(self, chat_id: str, thread_id: str | None) -> None:
-        await asyncio.to_thread(self._set_codex_thread_sync, chat_id, thread_id)
-
-    def _set_codex_thread_sync(self, chat_id: str, thread_id: str | None) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                "UPDATE chats SET codex_thread_id = ?, updated_at = ? WHERE id = ?",
-                (thread_id, utc_now(), chat_id),
-            )
-            conn.commit()
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            async with connection.cursor() as cursor:
+                await cursor.execute(
+                    "UPDATE chats SET codex_thread_id=%s, updated_at=%s WHERE id=%s",
+                    (thread_id, utc_now(), chat_id),
+                )
+            await connection.commit()
 
     @staticmethod
-    def _chat_from_row(row: sqlite3.Row) -> ChatSession:
+    def _metadata(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        try:
+            parsed = json.loads(str(value or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _chat_from_row(row: dict[str, Any]) -> ChatSession:
         return ChatSession(
-            id=row["id"],
-            user_id=row["user_id"],
-            summary=row["summary"],
-            estimated_tokens=row["estimated_tokens"],
-            codex_thread_id=row["codex_thread_id"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
+            id=str(row["id"]),
+            user_id=str(row["user_id"]),
+            summary=str(row.get("summary") or ""),
+            estimated_tokens=int(row.get("estimated_tokens") or 0),
+            codex_thread_id=(
+                str(row["codex_thread_id"])
+                if row.get("codex_thread_id") is not None
+                else None
+            ),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    @classmethod
+    def _message_from_row(cls, row: dict[str, Any]) -> ChatMessage:
+        return ChatMessage(
+            id=str(row["id"]),
+            chat_id=str(row["chat_id"]),
+            role=str(row["role"]),
+            content=str(row["content"]),
+            metadata=cls._metadata(row.get("metadata_json")),
+            created_at=str(row["created_at"]),
         )

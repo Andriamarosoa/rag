@@ -6,6 +6,8 @@ __pycache__/
 .env
 data/*.db
 data/*.db-*
+data/backups/
+data/uploads/
 mariadb_data/
 codex_data/
 .DS_Store

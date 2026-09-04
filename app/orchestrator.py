@@ -688,6 +688,7 @@ class Orchestrator:
         emit: FlowEmitter | None,
         *,
         module: str | None,
+        continuation: bool = False,
     ) -> dict[str, Any]:
         """Handle the strict SKB path without exposing general model knowledge.
 
@@ -704,7 +705,14 @@ class Orchestrator:
             mode="skb_grounded",
             module=module,
         )
-        chat = await self.store.get_or_create_chat(user_id=user_id, chat_id=chat_id)
+        if continuation:
+            if not chat_id:
+                raise ValueError("chat.continue requires an existing chat_id")
+            chat = await self.store.get_chat(chat_id, user_id=user_id)
+            if chat is None:
+                raise ValueError("chat.continue references an unknown chat")
+        else:
+            chat = await self.store.get_or_create_chat(user_id=user_id, chat_id=chat_id)
         await emit_flow(
             emit,
             "session.ready",
@@ -716,21 +724,30 @@ class Orchestrator:
 
         prior_messages = await self.store.list_messages(chat.id)
 
-        await self.store.append_message(
-            ChatMessage(
+        if continuation:
+            await emit_flow(
+                emit,
+                "message.user.reused",
                 chat_id=chat.id,
-                role="user",
-                content=text,
-                metadata={"module": module, "grounded": True},
+                chars=len(text),
+                module=module,
             )
-        )
-        await emit_flow(
-            emit,
-            "message.user.persisted",
-            chat_id=chat.id,
-            chars=len(text),
-            module=module,
-        )
+        else:
+            await self.store.append_message(
+                ChatMessage(
+                    chat_id=chat.id,
+                    role="user",
+                    content=text,
+                    metadata={"module": module, "grounded": True},
+                )
+            )
+            await emit_flow(
+                emit,
+                "message.user.persisted",
+                chat_id=chat.id,
+                chars=len(text),
+                module=module,
+            )
 
         try:
             retrieval_question = await self.grounded_answer.rewrite_question(
@@ -804,6 +821,8 @@ class Orchestrator:
                 "url": source.get("url"),
                 "module": source.get("module"),
                 "section": source.get("section"),
+                "source_kind": source.get("source_kind"),
+                "document_id": source.get("document_id"),
             }
             for source in result.get("sources", [])
             if isinstance(source, dict)
@@ -839,7 +858,7 @@ class Orchestrator:
             module=module,
             grounded=True,
             source_count=len(sources),
-            action_count=0,
+            action_count=len(result.get("actions") or []),
             matched_rule=None,
             matched_rules=[],
             matched_rule_count=0,
@@ -856,6 +875,7 @@ class Orchestrator:
         emit: FlowEmitter | None = None,
         *,
         module: str | None = None,
+        continuation: bool = False,
     ) -> dict[str, Any]:
         if self.grounded_answer is not None:
             return await self._handle_grounded_message(
@@ -864,7 +884,11 @@ class Orchestrator:
                 text,
                 emit,
                 module=module,
+                continuation=continuation,
             )
+
+        if continuation:
+            raise ValueError("chat.continue is only available for grounded chat")
 
         await emit_flow(emit, "flow.started", user_id=user_id, requested_chat_id=chat_id)
 

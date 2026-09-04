@@ -6,7 +6,9 @@ from pydantic import BaseModel, Field
 
 
 class ClientEnvelope(BaseModel):
-    type: Literal["chat.message", "agent.execute", "rules.reload", "ping"]
+    type: Literal[
+        "chat.message", "chat.continue", "agent.execute", "rules.reload", "ping"
+    ]
     request_id: str | None = None
     user_id: str
     chat_id: str | None = None

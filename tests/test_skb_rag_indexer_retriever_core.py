@@ -204,3 +204,43 @@ async def test_retriever_canonicalizes_module_and_drops_untrusted_source_urls():
         "expected-index",
     )
     assert embeddings.query == "leave balance"
+
+
+@pytest.mark.asyncio
+async def test_retriever_merges_uploaded_docx_chunks_with_skb_results():
+    document_id = "248c6ee3-74e4-4d10-9439-024fd506f7d8"
+    skb = RetrievedChunk(
+        chunk_id="skb",
+        page_id="spay:a",
+        title="SKB",
+        source_url="http://skb.uniconsults.mu/doku.php?id=spay:a",
+        module="Payroll",
+        section="A",
+        section_path=("A",),
+        text="skb",
+        distance=0.2,
+        score=0.8,
+    )
+    uploaded = replace(
+        skb,
+        chunk_id="docx",
+        page_id=f"spay:file:{document_id}",
+        source_url=f"/knowledge/files/{document_id}/download",
+        text="docx",
+        distance=0.1,
+        score=0.9,
+        source_kind="file",
+        document_id=document_id,
+    )
+
+    class Store(_FakeStore):
+        async def search_knowledge_files(self, *_args, **_kwargs):
+            return [uploaded]
+
+    store = Store()
+    store.results = [skb]
+    results = await SkbRetriever(
+        _FakeEmbeddings(), store, top_k=2, index_signature="expected-index"
+    ).retrieve("password", module="spay")
+
+    assert [item.chunk_id for item in results] == ["docx", "skb"]

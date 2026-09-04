@@ -11,6 +11,7 @@ from hashlib import sha256
 from typing import Any, TypeVar
 from uuid import uuid4
 
+from app.knowledge.models import IngestedDocument
 from app.skb.models import (
     ActivationResult,
     ActiveGeneration,
@@ -286,6 +287,64 @@ class MariaDBVectorStore:
                 )
                 await cursor.execute(
                     """
+                    CREATE TABLE IF NOT EXISTS kb_files (
+                        file_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin
+                            NOT NULL PRIMARY KEY,
+                        module_namespace VARCHAR(128) NOT NULL,
+                        module VARCHAR(128) NOT NULL,
+                        title VARCHAR(512) NOT NULL,
+                        original_filename VARCHAR(512) NOT NULL,
+                        storage_key VARCHAR(128) CHARACTER SET ascii
+                            COLLATE ascii_bin NOT NULL,
+                        mime_type VARCHAR(255) NOT NULL,
+                        size_bytes BIGINT UNSIGNED NOT NULL,
+                        file_sha256 CHAR(64) CHARACTER SET ascii
+                            COLLATE ascii_bin NOT NULL,
+                        text_sha256 CHAR(64) CHARACTER SET ascii
+                            COLLATE ascii_bin NOT NULL,
+                        index_signature CHAR(64) CHARACTER SET ascii
+                            COLLATE ascii_bin NOT NULL,
+                        status VARCHAR(16) NOT NULL DEFAULT 'ready',
+                        extracted_characters BIGINT UNSIGNED NOT NULL,
+                        chunk_count INT UNSIGNED NOT NULL,
+                        created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+                        updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+                            ON UPDATE CURRENT_TIMESTAMP(6),
+                        UNIQUE KEY uq_kb_files_module_hash
+                            (module_namespace, file_sha256),
+                        KEY idx_kb_files_module_status
+                            (module, status, index_signature)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                        COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                await cursor.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS kb_file_chunks (
+                        row_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                        file_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin
+                            NOT NULL,
+                        chunk_id CHAR(64) CHARACTER SET ascii COLLATE ascii_bin
+                            NOT NULL,
+                        section VARCHAR(512) NOT NULL,
+                        section_path TEXT NOT NULL,
+                        position INT UNSIGNED NOT NULL,
+                        content MEDIUMTEXT NOT NULL,
+                        content_hash CHAR(64) CHARACTER SET ascii
+                            COLLATE ascii_bin NOT NULL,
+                        embedding VECTOR({self.dimension}) NOT NULL,
+                        UNIQUE KEY uq_kb_file_chunks_file_chunk (file_id, chunk_id),
+                        KEY idx_kb_file_chunks_file_position (file_id, position),
+                        VECTOR INDEX kb_file_chunks_embedding_idx (embedding)
+                            M=8 DISTANCE=cosine,
+                        CONSTRAINT fk_kb_file_chunks_file FOREIGN KEY (file_id)
+                            REFERENCES kb_files(file_id) ON DELETE CASCADE
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                        COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                await cursor.execute(
+                    """
                     SELECT COLUMN_TYPE AS column_type
                     FROM information_schema.COLUMNS
                     WHERE TABLE_SCHEMA=%s AND TABLE_NAME='skb_chunks_v2'
@@ -300,6 +359,28 @@ class MariaDBVectorStore:
                     raise VectorStoreError(
                         "existing skb_chunks_v2 embedding dimension does not match "
                         f"the configured dimension {self.dimension}: {column_type!r}"
+                    )
+                await cursor.execute(
+                    """
+                    SELECT COLUMN_TYPE AS column_type
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='kb_file_chunks'
+                        AND COLUMN_NAME='embedding'
+                    """,
+                    (self.database,),
+                )
+                file_column = await cursor.fetchone()
+                file_column_type = str((file_column or {}).get("column_type", ""))
+                file_dimension_match = re.fullmatch(
+                    r"vector\((\d+)\)", file_column_type, re.I
+                )
+                if (
+                    not file_dimension_match
+                    or int(file_dimension_match.group(1)) != self.dimension
+                ):
+                    raise VectorStoreError(
+                        "existing kb_file_chunks embedding dimension does not match "
+                        f"the configured dimension {self.dimension}: {file_column_type!r}"
                     )
             await connection.commit()
 
@@ -804,6 +885,234 @@ class MariaDBVectorStore:
                 return len(stale_ids)
 
         return await self._run_transaction(operation)
+
+    async def add_knowledge_file(
+        self,
+        *,
+        file_id: str,
+        document: IngestedDocument,
+        module: str,
+        storage_key: str,
+        index_signature: str,
+        embeddings: Sequence[Sequence[float]],
+    ) -> tuple[str, bool]:
+        if len(document.chunks) != len(embeddings) or not document.chunks:
+            raise ValueError("each DOCX chunk must have one embedding")
+        vector_payloads = [
+            _vector_json(values, self.dimension) for values in embeddings
+        ]
+
+        async def operation(connection: Any) -> tuple[str, bool]:
+            async with connection.cursor(self._aiomysql.DictCursor) as cursor:
+                await cursor.execute(
+                    """
+                    INSERT IGNORE INTO kb_files(
+                        file_id, module_namespace, module, title,
+                        original_filename, storage_key, mime_type, size_bytes,
+                        file_sha256, text_sha256, index_signature, status,
+                        extracted_characters, chunk_count
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ready',%s,%s)
+                    """,
+                    (
+                        file_id,
+                        document.module_namespace,
+                        module,
+                        document.title,
+                        document.original_filename,
+                        storage_key,
+                        document.mime_type,
+                        document.size_bytes,
+                        document.file_sha256,
+                        document.text_sha256,
+                        index_signature,
+                        document.extracted_characters,
+                        len(document.chunks),
+                    ),
+                )
+                if cursor.rowcount == 0:
+                    await cursor.execute(
+                        """
+                        SELECT file_id FROM kb_files
+                        WHERE module_namespace=%s AND file_sha256=%s
+                        """,
+                        (document.module_namespace, document.file_sha256),
+                    )
+                    existing = await cursor.fetchone()
+                    if not existing:
+                        raise VectorStoreError("DOCX duplicate lookup failed")
+                    return str(existing["file_id"]), False
+
+                await cursor.executemany(
+                    """
+                    INSERT INTO kb_file_chunks(
+                        file_id, chunk_id, section, section_path, position,
+                        content, content_hash, embedding
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,VEC_FromText(%s))
+                    """,
+                    [
+                        (
+                            file_id,
+                            chunk.chunk_id,
+                            chunk.section,
+                            json.dumps(chunk.section_path, ensure_ascii=False),
+                            chunk.position,
+                            chunk.text,
+                            chunk.content_hash,
+                            vector,
+                        )
+                        for chunk, vector in zip(
+                            document.chunks, vector_payloads, strict=True
+                        )
+                    ],
+                )
+                return file_id, True
+
+        return await self._run_transaction(operation)
+
+    async def list_knowledge_files(self) -> list[dict[str, Any]]:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            async with connection.cursor(self._aiomysql.DictCursor) as cursor:
+                await cursor.execute(
+                    """
+                    SELECT file_id, module_namespace, module, title,
+                           original_filename, mime_type, size_bytes, file_sha256,
+                           status, extracted_characters, chunk_count, created_at
+                    FROM kb_files
+                    ORDER BY created_at DESC, file_id
+                    """
+                )
+                rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def find_knowledge_file(
+        self, module_namespace: str, file_sha256: str
+    ) -> dict[str, Any] | None:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            async with connection.cursor(self._aiomysql.DictCursor) as cursor:
+                await cursor.execute(
+                    """
+                    SELECT file_id, module_namespace, module, title,
+                           original_filename, storage_key, mime_type, size_bytes,
+                           file_sha256, status, extracted_characters,
+                           chunk_count, created_at
+                    FROM kb_files
+                    WHERE module_namespace=%s AND file_sha256=%s
+                    """,
+                    (module_namespace, file_sha256),
+                )
+                row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def get_knowledge_file(self, file_id: str) -> dict[str, Any] | None:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            async with connection.cursor(self._aiomysql.DictCursor) as cursor:
+                await cursor.execute(
+                    """
+                    SELECT file_id, module_namespace, module, title,
+                           original_filename, storage_key, mime_type, size_bytes,
+                           file_sha256, status, extracted_characters,
+                           chunk_count, created_at
+                    FROM kb_files WHERE file_id=%s
+                    """,
+                    (file_id,),
+                )
+                row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def delete_knowledge_file(self, file_id: str) -> dict[str, Any] | None:
+        async def operation(connection: Any) -> dict[str, Any] | None:
+            async with connection.cursor(self._aiomysql.DictCursor) as cursor:
+                await cursor.execute(
+                    "SELECT file_id, storage_key FROM kb_files WHERE file_id=%s FOR UPDATE",
+                    (file_id,),
+                )
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                await cursor.execute("DELETE FROM kb_files WHERE file_id=%s", (file_id,))
+                return dict(row)
+
+        return await self._run_transaction(operation)
+
+    async def search_knowledge_files(
+        self,
+        query_embedding: Sequence[float],
+        module: str | None = None,
+        limit: int = 6,
+        max_distance: float | None = 0.45,
+        *,
+        expected_index_signature: str | None = None,
+    ) -> list[RetrievedChunk]:
+        vector = _vector_json(query_embedding, self.dimension)
+        limit = max(1, min(int(limit), 100))
+        if max_distance is not None and not 0.0 <= float(max_distance) <= 2.0:
+            raise ValueError("max_distance must be between 0 and 2")
+        canonical_module = normalize_module_filter(module)
+        where_parts = ["f.status='ready'"]
+        parameters: list[Any] = [vector]
+        if canonical_module is not None:
+            where_parts.append("f.module=%s")
+            parameters.append(canonical_module)
+        if expected_index_signature is not None:
+            where_parts.append("f.index_signature=%s")
+            parameters.append(expected_index_signature)
+        parameters.append(limit)
+
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            async with connection.cursor(self._aiomysql.DictCursor) as cursor:
+                await cursor.execute(
+                    f"""
+                    SELECT c.chunk_id, c.section, c.section_path, c.content,
+                           f.file_id, f.module_namespace, f.module, f.title,
+                           VEC_DISTANCE_COSINE(
+                               c.embedding, VEC_FromText(%s)
+                           ) AS distance
+                    FROM kb_file_chunks AS c
+                    IGNORE INDEX (kb_file_chunks_embedding_idx)
+                    JOIN kb_files AS f ON f.file_id=c.file_id
+                    WHERE {' AND '.join(where_parts)}
+                    ORDER BY distance ASC
+                    LIMIT %s
+                    """,
+                    tuple(parameters),
+                )
+                rows = await cursor.fetchall()
+
+        results: list[RetrievedChunk] = []
+        for row in rows:
+            if row.get("distance") is None:
+                continue
+            distance = float(row["distance"])
+            if max_distance is not None and distance > float(max_distance):
+                continue
+            try:
+                raw_path = json.loads(str(row["section_path"]))
+                section_path = tuple(str(item) for item in raw_path)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                section_path = (str(row["section"]),)
+            file_id = str(row["file_id"])
+            namespace = str(row["module_namespace"])
+            results.append(
+                RetrievedChunk(
+                    chunk_id=str(row["chunk_id"]),
+                    page_id=f"{namespace}:file:{file_id}",
+                    title=str(row["title"]),
+                    source_url=f"/knowledge/files/{file_id}/download",
+                    module=str(row["module"]),
+                    section=str(row["section"]),
+                    section_path=section_path,
+                    text=str(row["content"]),
+                    distance=distance,
+                    score=1.0 - distance,
+                    source_kind="file",
+                    document_id=file_id,
+                )
+            )
+        return results
 
     async def stats(self) -> StoreStats:
         pool = self._require_pool()

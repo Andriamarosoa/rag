@@ -34,6 +34,24 @@ Send a question and an optional SKB module namespace:
 `module` may be `null` or one of the namespaces returned by `GET /skb/modules`.
 An unknown value produces an `error` event with `code=invalid_module`.
 
+Selecting a module from a clarification uses the existing chat without adding a
+duplicate user message:
+
+```json
+{
+  "type": "chat.continue",
+  "request_id": "req-2",
+  "user_id": "user-123",
+  "chat_id": "chat-uuid",
+  "data": {
+    "question": "How do I reset my password?",
+    "module": "spay"
+  }
+}
+```
+
+This flow emits `message.user.reused` instead of `message.user.persisted`.
+
 The active `chat.message` event sequence is:
 
 ```text
@@ -79,6 +97,24 @@ citation, generation is omitted or discarded and the result is:
   "answer": "Je n’ai pas trouvé cette information dans la base de connaissances Sicorax.",
   "sources": [],
   "citations": [],
+  "grounded": true
+}
+```
+
+When no module was selected and the best results from different modules are
+within `SKB_AMBIGUITY_DISTANCE_DELTA`, the application does not ask Qwen to mix
+them. It returns a sourced clarification:
+
+```json
+{
+  "status": "clarification_needed",
+  "answer": "Several SKB procedures match this request. Please select the relevant module: Payroll or PMS.",
+  "candidate_modules": ["Payroll", "PMS"],
+  "actions": [
+    {"type": "select_module", "label": "Payroll", "module": "spay", "question": "..."},
+    {"type": "select_module", "label": "PMS", "module": "pms", "question": "..."}
+  ],
+  "sources": ["application-validated source objects"],
   "grounded": true
 }
 ```

@@ -1,12 +1,13 @@
 # RAG — strict Sicorax Knowledge Base assistant
 
 This project exposes a FastAPI/WebSocket assistant whose chat answers are grounded
-exclusively in the public Sicorax Knowledge Base (SKB):
+exclusively in indexed Sicorax content: the public SKB crawler plus optional DOCX
+documents imported into a selected module.
 
 <http://skb.uniconsults.mu/>
 
 The strict chat path does not use the model's general knowledge. It retrieves
-relevant SKB sections from a persistent vector index, asks Qwen to answer from
+relevant indexed sections from a persistent vector index, asks Qwen to answer from
 those sections only, validates the citations returned by the model, and abstains
 when the evidence is missing or unavailable.
 
@@ -22,6 +23,11 @@ DokuWiki index (do=index)
     -> section-aware chunks with overlap
     -> Ollama /api/embed (bge-m3 multilingual, 1024 dimensions)
     -> MariaDB 11.8 LTS VECTOR(1024), cosine index
+
+DOCX upload (keeps the crawler active)
+    -> validate and extract headings, paragraphs, and tables
+    -> section-aware chunks -> Ollama embeddings
+    -> MariaDB kb_files and kb_file_chunks
 ```
 
 Chat:
@@ -46,7 +52,11 @@ Important guarantees:
 - the application releases a claim only when every evidence quote is found in
   its cited SKB chunk and every citation ID belongs to the retrieved set;
 - public source URLs are rebuilt from validated chunks and restricted to the SKB
-  host;
+  host or the internal DOCX download route;
+- when unfiltered results from different modules are nearly tied, the assistant
+  returns a sourced module clarification instead of mixing incompatible procedures;
+- after a clear winner is identified, only chunks from that winning page are sent
+  to Qwen;
 - no relevant chunk, invalid JSON, an invalid citation, or an unsupported answer
   produces the fixed abstention:
   `Je n’ai pas trouvé cette information dans la base de connaissances Sicorax.`;
@@ -54,10 +64,14 @@ Important guarantees:
   `La base de connaissances Sicorax est temporairement indisponible.`;
 - there is no fallback to general model knowledge.
 
+The test UI persists the selected module and current `chat_id` in guarded browser
+storage so refreshing the page does not silently change the retrieval scope.
+
 ## Runtime components
 
 - FastAPI and WebSocket transport;
-- SQLite chat/session persistence;
+- MariaDB chat/session persistence;
+- optional DOCX knowledge import assigned to an SKB module;
 - DokuWiki discovery and `export_raw` ingestion;
 - Ollama `bge-m3` multilingual embeddings (1024 dimensions);
 - MariaDB 11.8 LTS native `VECTOR` storage and exact cosine search over the
@@ -279,7 +293,10 @@ An answered result includes application-validated sources:
 ```
 
 The frontend renders the answer as text and sources as safe HTTP(S) links. It
-does not render model-provided HTML.
+does not render model-provided HTML. A clarification exposes internal module
+actions inside each matching source card: **Continuer** re-submits the question
+with that module filter, while **Visiter le lien ↗** opens the official SKB page
+in a new tab. The source card itself is not clickable.
 
 If the chat orchestration raises an unexpected exception, the server emits
 `flow.failed`, then an `error` event with `code=flow_failed`. That failure
@@ -306,6 +323,7 @@ Core RAG variables:
 | `SKB_MIN_CHUNK_SIZE` | `80` | Small-tail merge threshold |
 | `SKB_RETRIEVAL_TOP_K` | `3` | Maximum chunks for grounded chat retrieval |
 | `SKB_RETRIEVAL_MAX_DISTANCE` | `0.45` | Maximum cosine distance |
+| `SKB_AMBIGUITY_DISTANCE_DELTA` | `0.02` | Ask for a module when cross-module results are nearly tied |
 | `SKB_ANSWER_MAX_CONTEXT_CHARACTERS` | `24000` | Evidence budget sent to Qwen |
 | `SKB_SYNC_ON_STARTUP` | `true` | Schedule incremental sync after startup |
 | `OLLAMA_BASE_URL` | `http://100.89.128.87:11434` | Qwen native API root |

@@ -119,6 +119,8 @@ class RetrievedChunk:
     text: str
     distance: float
     score: float
+    source_kind: str = "skb"
+    document_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
