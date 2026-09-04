@@ -33,6 +33,8 @@ services:
     environment:
       APP_HOST: 0.0.0.0
       APP_PORT: ${APP_PORT:-8765}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-}
+      CORS_ALLOW_ORIGIN_REGEX: ${CORS_ALLOW_ORIGIN_REGEX:-}
       RULES_PATH: /app/config/rules
 
       # Codex remains available in-container for agent/reasoning operations that need it.
@@ -88,7 +90,7 @@ services:
       CONTEXT_KEEP_RECENT_TOKENS: ${CONTEXT_KEEP_RECENT_TOKENS:-12000}
       CONTEXT_SUMMARY_TARGET_TOKENS: ${CONTEXT_SUMMARY_TARGET_TOKENS:-8000}
     ports:
-      - "127.0.0.1:${APP_PORT:-8765}:${APP_PORT:-8765}"
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-8765}:${APP_PORT:-8765}"
     volumes:
       # Source is visible to Codex but not writable from the container.
       - .:/app:ro
