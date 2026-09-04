@@ -122,6 +122,22 @@ class DocxIngestor:
         match = re.search(r"(?:heading|titre)\s*(\d+)$", style_name, re.I)
         if match:
             return max(1, min(9, int(match.group(1))))
+        text = _clean(paragraph.text)
+        if not text:
+            return None
+        # Sicorax procedure documents use visually formatted Normal paragraphs
+        # for internal headings. Preserve that authored structure during chunking.
+        if text.startswith(("📌", "⚙", "⚙️")):
+            return 2
+        visible_runs = [run for run in paragraph.runs if run.text.strip()]
+        fully_bold = bool(visible_runs) and all(run.bold is True for run in visible_runs)
+        if fully_bold:
+            if re.match(r"^(?:common questions|frequently asked|faq)\b", text, re.I):
+                return 2
+            if re.match(r"^\d+[.)]\s+", text):
+                return 3
+            if text.endswith(":") and text.casefold() not in {"solution:", "answer:"}:
+                return 3
         return None
 
     def ingest(

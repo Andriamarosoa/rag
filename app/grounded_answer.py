@@ -80,6 +80,10 @@ class GroundedAnswerService:
         r")[ ?!.…]*$",
         re.IGNORECASE,
     )
+    _FAQ_TITLE = re.compile(
+        r"(?:^|[_\s-])prompts?(?:$|[_\s-])",
+        re.IGNORECASE,
+    )
 
     def __init__(
         self,
@@ -338,6 +342,21 @@ class GroundedAnswerService:
                     module=module,
                     retrieved_count=len(chunks),
                 )
+
+        if self._FAQ_TITLE.search(str(best["source"].get("title") or "")):
+            supporting_page = next(
+                (
+                    candidate
+                    for candidate in ranked_pages[1:]
+                    if not self._FAQ_TITLE.search(
+                        str(candidate["source"].get("title") or "")
+                    )
+                ),
+                None,
+            )
+            if supporting_page is None:
+                return [], None
+            best = supporting_page
 
         best_page_key = str(best["page_key"])
         selected = [chunk for chunk in chunks if self._page_key(chunk) == best_page_key]

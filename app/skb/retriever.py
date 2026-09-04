@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from urllib.parse import urlparse
 from uuid import UUID
@@ -10,6 +11,11 @@ from app.skb.vector_store import IndexNotReadyError, MariaDBVectorStore
 
 
 class SkbRetriever:
+    _FAQ_TITLE = re.compile(
+        r"(?:^|[_\s-])prompts?(?:$|[_\s-])",
+        re.IGNORECASE,
+    )
+
     def __init__(
         self,
         embeddings: OllamaEmbeddingClient,
@@ -58,6 +64,12 @@ class SkbRetriever:
             in self.allowed_source_hosts
         )
 
+    @classmethod
+    def _is_faq_result(cls, result: RetrievedChunk) -> bool:
+        return result.source_kind == "file" and bool(
+            cls._FAQ_TITLE.search(result.title)
+        )
+
     async def retrieve(
         self, query: str, module: str | None = None
     ) -> list[RetrievedChunk]:
@@ -65,11 +77,15 @@ class SkbRetriever:
         if not cleaned_query:
             return []
         vector = await self.embeddings.embed_query(cleaned_query)
+        file_search = getattr(self.store, "search_knowledge_files", None)
+        candidate_limit = (
+            min(100, self.top_k * 4) if callable(file_search) else self.top_k
+        )
         try:
             results = await self.store.search(
                 vector,
                 module=normalize_module_filter(module),
-                limit=self.top_k,
+                limit=candidate_limit,
                 max_distance=self.max_distance,
                 expected_index_signature=self.index_signature,
             )
@@ -77,17 +93,33 @@ class SkbRetriever:
             # Uploaded documents remain searchable while a first crawler
             # generation is still being prepared.
             results = []
-        file_search = getattr(self.store, "search_knowledge_files", None)
         if callable(file_search):
             results.extend(
                 await file_search(
                     vector,
                     module=normalize_module_filter(module),
-                    limit=self.top_k,
+                    limit=candidate_limit,
                     max_distance=self.max_distance,
                     expected_index_signature=self.index_signature,
                 )
             )
         trusted = [result for result in results if self._trusted_source(result)]
         trusted.sort(key=lambda result: result.distance)
-        return trusted[: self.top_k]
+        selected = trusted[: self.top_k]
+        if any(self._is_faq_result(result) for result in selected) and not any(
+            result.source_kind == "file" and not self._is_faq_result(result)
+            for result in selected
+        ):
+            supporting_document = next(
+                (
+                    result
+                    for result in trusted[self.top_k :]
+                    if result.source_kind == "file"
+                    and not self._is_faq_result(result)
+                ),
+                None,
+            )
+            if supporting_document is not None and self.top_k > 1:
+                selected[-1] = supporting_document
+                selected.sort(key=lambda result: result.distance)
+        return selected

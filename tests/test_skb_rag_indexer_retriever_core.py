@@ -244,3 +244,49 @@ async def test_retriever_merges_uploaded_docx_chunks_with_skb_results():
     ).retrieve("password", module="spay")
 
     assert [item.chunk_id for item in results] == ["docx", "skb"]
+
+
+@pytest.mark.asyncio
+async def test_retriever_keeps_a_process_candidate_when_faq_chunks_dominate():
+    faq_id = "248c6ee3-74e4-4d10-9439-024fd506f7d8"
+    process_id = "9a828c5e-cb1d-40f5-8c31-f743e7a20f5c"
+    base = RetrievedChunk(
+        chunk_id="faq-1",
+        page_id=f"spay:file:{faq_id}",
+        title="Employee_Leaver_Prompts",
+        source_url=f"/knowledge/files/{faq_id}/download",
+        module="Payroll",
+        section="FAQ",
+        section_path=("FAQ",),
+        text="Question",
+        distance=0.1,
+        score=0.9,
+        source_kind="file",
+        document_id=faq_id,
+    )
+    faq_results = [
+        replace(base, chunk_id=f"faq-{index}", distance=0.1 + index / 100)
+        for index in range(3)
+    ]
+    process = replace(
+        base,
+        chunk_id="process",
+        page_id=f"spay:file:{process_id}",
+        title="Employee_Leaver_Process",
+        source_url=f"/knowledge/files/{process_id}/download",
+        distance=0.2,
+        score=0.8,
+        document_id=process_id,
+    )
+
+    class Store(_FakeStore):
+        async def search_knowledge_files(self, *_args, **_kwargs):
+            return [*faq_results, process]
+
+    store = Store()
+    store.results = []
+    results = await SkbRetriever(
+        _FakeEmbeddings(), store, top_k=3, index_signature="expected-index"
+    ).retrieve("employee leaver", module="spay")
+
+    assert [item.chunk_id for item in results] == ["faq-0", "faq-1", "process"]

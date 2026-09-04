@@ -77,3 +77,35 @@ def test_docx_rejects_macro_payload():
             content_type=DOCX_MIME_TYPE,
             module_namespace="spay",
         )
+
+
+def test_docx_recognizes_sicorax_visual_headings_in_normal_paragraphs():
+    document = Document()
+    document.add_heading("Employee Leaver Process", level=1)
+    tips = document.add_paragraph("📌 Processing Tips:")
+    for run in tips.runs:
+        run.bold = True
+    document.add_paragraph("Complete every mandatory field before saving.")
+    document.add_paragraph("⚙️ Employee Leaver Process:")
+    document.add_paragraph("Open Employee, then select Leaver.")
+    document.add_paragraph("Common Questions and Solutions").runs[0].bold = True
+    document.add_paragraph("1. Why is the employee missing?").runs[0].bold = True
+    document.add_paragraph("Solution:").runs[0].bold = True
+    document.add_paragraph("Confirm that the employee is active.")
+    output = io.BytesIO()
+    document.save(output)
+
+    ingested = DocxIngestor().ingest(
+        output.getvalue(),
+        filename="employee.docx",
+        content_type=DOCX_MIME_TYPE,
+        module_namespace="spay",
+    )
+
+    headings = [section.heading for section in ingested.sections]
+    assert headings == [
+        "📌 Processing Tips:",
+        "⚙️ Employee Leaver Process:",
+        "1. Why is the employee missing?",
+    ]
+    assert "Solution:" in ingested.sections[-1].text

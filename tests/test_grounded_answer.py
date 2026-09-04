@@ -528,6 +528,62 @@ async def test_uploaded_file_source_url_is_rebuilt_from_valid_document_id():
 
 
 @pytest.mark.asyncio
+async def test_faq_question_chunk_routes_grounding_to_supporting_process_document():
+    faq_id = "248c6ee3-74e4-4d10-9439-024fd506f7d8"
+    process_id = "9a828c5e-cb1d-40f5-8c31-f743e7a20f5c"
+    retriever = FakeRetriever(
+        [
+            sample_chunk(
+                chunk_id="faq",
+                page_id=f"spay:file:{faq_id}",
+                title="Employee_Leaver_Prompts",
+                source_url=f"/knowledge/files/{faq_id}/download",
+                source_kind="file",
+                document_id=faq_id,
+                text='"Explain the employee leaver process in simple terms."',
+                distance=0.1,
+            ),
+            sample_chunk(
+                chunk_id="process",
+                page_id=f"spay:file:{process_id}",
+                title="Employee_Leaver_Process",
+                source_url=f"/knowledge/files/{process_id}/download",
+                source_kind="file",
+                document_id=process_id,
+                text="Open Employee, select Leaver, then click New.",
+                distance=0.15,
+            ),
+        ]
+    )
+    llm = FakeLlm(
+        {
+            "status": "answered",
+            "claims": [
+                {
+                    "text": "Open Employee and select Leaver.",
+                    "evidence": [
+                        {
+                            "citation_id": "process",
+                            "quote": "Open Employee, select Leaver",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    result = await GroundedAnswerService(retriever, llm).answer(
+        "Explain the employee leaver process", module="spay"
+    )
+
+    assert result["status"] == "answered"
+    assert result["citations"] == ["process"]
+    assert [item["citation_id"] for item in source_chunks_sent_to_llm(llm)] == [
+        "process"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_empty_retrieval_abstains_without_model_call():
     retriever = FakeRetriever([])
     llm = FakeLlm(
