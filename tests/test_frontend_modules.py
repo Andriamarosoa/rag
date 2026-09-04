@@ -174,8 +174,10 @@ def test_assistant_sources_use_safe_dom_links_without_rendering_model_html():
     assert "view.content.textContent=text" in compact
     assert "renderSources(view.sources,d.sources,actions)" in compact
     assert "safeHttpUrl(source.url)" in compact
+    assert "consturl=newURL(value,`${apiOrigin}/`)" in compact
     assert "url.protocol==='http:'||url.protocol==='https:'" in compact
     assert "url.hostname.toLowerCase()==='skb.uniconsults.mu'" in compact
+    assert "constsafeFile=url.origin===apiOrigin" in compact
     assert "if(!href)return" in compact
     assert "visitLink.href=href" in compact
     assert "visitLink.href=source.url" not in compact
@@ -231,8 +233,26 @@ def test_docx_upload_is_hidden_in_developer_mode_with_its_own_module_selector():
     assert "constnamespace=developerModuleSelect.value" in compact
     assert "form.append('module',namespace)" in compact
     assert "form.append('file',file,file.name)" in compact
-    assert "fetch('/knowledge/files',{method:'POST',body:form})" in compact
+    assert "fetch(apiUrl('/knowledge/files'),{method:'POST',body:form})" in compact
     assert "/^\\/knowledge\\/files\\/" in compact
+
+
+def test_http_server_uses_backend_port_for_http_and_websocket_requests():
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    compact = re.sub(r"\s+", "", html)
+
+    assert "constBACKEND_PORT='8765'" in compact
+    assert "constHTTP_SERVER_PORT='8080'" in compact
+    assert "if(location.protocol!=='http:'&&location.protocol!=='https:')" in compact
+    assert "return`http://localhost:${BACKEND_PORT}`" in compact
+    assert "if(location.port!==HTTP_SERVER_PORT)returnlocation.origin" in compact
+    assert "constbackendUrl=newURL(location.origin)" in compact
+    assert "backendUrl.port=BACKEND_PORT" in compact
+    assert "constapiOrigin=resolveBackendOrigin()" in compact
+    assert "functionapiUrl(path){returnnewURL(path,`${apiOrigin}/`).toString();}" in compact
+    assert "constwebsocketUrl=newURL('/ws',`${apiOrigin}/`)" in compact
+    assert "websocketUrl.protocol=websocketUrl.protocol==='https:'?'wss:':'ws:'" in compact
+    assert "constdefaultWs=websocketUrl.toString()" in compact
 
 
 def test_select_module_action_is_matched_to_its_source_and_not_rendered_separately():

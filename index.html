@@ -414,11 +414,24 @@
     $('chatId').value=readStoredValue(STORAGE_KEYS.chatId);
   }
 
-  const defaultWs = location.protocol === 'https:'
-    ? `wss://${location.host}/ws`
-    : location.protocol === 'http:'
-      ? `ws://${location.host}/ws`
-      : 'ws://localhost:8765/ws';
+  const BACKEND_PORT = '8765';
+  const HTTP_SERVER_PORT = '8080';
+
+  function resolveBackendOrigin(){
+    if(location.protocol!=='http:'&&location.protocol!=='https:'){
+      return `http://localhost:${BACKEND_PORT}`;
+    }
+    if(location.port!==HTTP_SERVER_PORT) return location.origin;
+    const backendUrl=new URL(location.origin);
+    backendUrl.port=BACKEND_PORT;
+    return backendUrl.origin;
+  }
+
+  const apiOrigin=resolveBackendOrigin();
+  function apiUrl(path){ return new URL(path,`${apiOrigin}/`).toString(); }
+  const websocketUrl=new URL('/ws',`${apiOrigin}/`);
+  websocketUrl.protocol=websocketUrl.protocol==='https:'?'wss:':'ws:';
+  const defaultWs=websocketUrl.toString();
   wsUrl.value = defaultWs;
 
   function requestId(){
@@ -782,10 +795,10 @@
   function safeHttpUrl(value){
     if(typeof value!=='string'||!value.trim()) return null;
     try{
-      const url=new URL(value,location.origin);
+      const url=new URL(value,`${apiOrigin}/`);
       const safeProtocol=url.protocol==='http:'||url.protocol==='https:';
       const safeHost=url.hostname.toLowerCase()==='skb.uniconsults.mu';
-      const safeFile=url.origin===location.origin
+      const safeFile=url.origin===apiOrigin
         && /^\/knowledge\/files\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/download$/i.test(url.pathname)
         && !url.search
         && !url.hash;
@@ -1145,7 +1158,7 @@
     uploadDocxBtn.disabled=true;
     uploadDocxBtn.textContent='Indexation…';
     try{
-      const response=await fetch('/knowledge/files',{method:'POST',body:form});
+      const response=await fetch(apiUrl('/knowledge/files'),{method:'POST',body:form});
       const result=await response.json();
       if(!response.ok) throw new Error(result?.detail?.message||'Import DOCX impossible');
       toast(result.created===false?'Ce document est déjà indexé.':'Document DOCX indexé.','success');

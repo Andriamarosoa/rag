@@ -10,13 +10,14 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 
 from app.agents.email_agent import SendEmailAgent
 from app.agents.registry import AgentRegistry
 from app.codex.client import CodexMcpClient
 from app.codex.strict_segmented_service import StrictSegmentedDecisionService
-from app.config import settings
+from app.config import Settings, settings
 from app.context.manager import ContextManager
 from app.grounded_answer import GroundedAnswerService
 from app.knowledge.docx import DocxIngestionError, DocxIngestor
@@ -269,7 +270,23 @@ async def lifespan(_: FastAPI):
     await codex_client.close()
 
 
+def _configure_cors(application: FastAPI, app_settings: Settings) -> None:
+    allowed_origins = app_settings.cors_allow_origin_list
+    allowed_origin_regex = app_settings.cors_allow_origin_regex.strip() or None
+    if not allowed_origins and allowed_origin_regex is None:
+        return
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_origin_regex=allowed_origin_regex,
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["*"],
+    )
+
+
 app = FastAPI(title="RAG WebSocket Orchestrator", version="0.1.0", lifespan=lifespan)
+_configure_cors(app, settings)
 app.include_router(build_router(manager, orchestrator, agents, rules))
 
 

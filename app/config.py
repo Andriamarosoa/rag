@@ -13,6 +13,12 @@ class Settings(BaseSettings):
     app_port: int = 8765
     rules_path: Path = Path("config/rules")
 
+    # Cross-origin access is disabled by default. Set one or both values when
+    # the static frontend is served from a different origin (for example by
+    # http-server on port 8080).
+    cors_allow_origins: str = ""
+    cors_allow_origin_regex: str = ""
+
     context_compact_at_tokens: int = 50_000
     context_keep_recent_tokens: int = 12_000
     context_summary_target_tokens: int = 8_000
@@ -77,6 +83,14 @@ class Settings(BaseSettings):
     @property
     def codex_arg_list(self) -> list[str]:
         return shlex.split(self.codex_args)
+
+    @property
+    def cors_allow_origin_list(self) -> list[str]:
+        return [
+            origin.strip()
+            for origin in self.cors_allow_origins.split(",")
+            if origin.strip()
+        ]
 
 
 settings = Settings()
